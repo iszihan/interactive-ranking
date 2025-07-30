@@ -9,6 +9,8 @@ body {
 #container {
   width: 200px;
   position: relative;
+  user-select: none;
+  -webkit-user-select: none; /* For Safari */
 }
 
 .brick {
