@@ -1,5 +1,5 @@
 body {
-  background: #000;
+  background: #fff;
   display: flex;
   justify-content: center;
   padding-top: 50px;
@@ -11,6 +11,9 @@ body {
   position: relative;
   user-select: none;
   -webkit-user-select: none; /* For Safari */
+  touch-action: none; /* Prevents touch interactions */
+  -webkit-touch-callout: none; /* Prevents callout on long press */
+  overscroll-behavior: contain;
 }
 
 .brick {

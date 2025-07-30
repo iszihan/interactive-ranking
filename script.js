@@ -15,6 +15,7 @@ function getClientY(e) {
 function onMouseDown(e)
 {
   if (!e.target.classList.contains("brick")) return;
+  e.preventDefault();
   
   draggingElem = e.target;
   startY = getClientY(e);
@@ -31,6 +32,7 @@ container.addEventListener("mousedown", onMouseDown);
 container.addEventListener("touchstart", onMouseDown, { passive: false }); // passive: false allows preventDefault()
 
 function onMouseMove(e) {
+  e.preventDefault();
   if (!draggingElem) return;
 
   const deltaY = getClientY(e) - startY;
@@ -104,11 +106,13 @@ function onMouseUp() {
   document.removeEventListener("touchmove", onMouseMove);
   document.removeEventListener("touchend", onMouseUp);
 
-  // Let the browser repaint first
+  // Let the browser repaint first, and then really let it and then finish reset
   requestAnimationFrame(() => {
-    // Then remove the class
-    bricks.forEach((b) => {
-      b.classList.remove("resetting");
+    requestAnimationFrame(() => {
+      // Then remove the class
+      bricks.forEach((b) => {
+        b.classList.remove("resetting");
+      });
     });
   });
 
