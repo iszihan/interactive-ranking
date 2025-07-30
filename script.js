@@ -8,23 +8,32 @@ function indexOfElement(el) {
   return [...container.children].indexOf(el);
 }
 
-container.addEventListener("mousedown", (e) => {
+function getClientY(e) {
+  return e.touches ? e.touches[0].clientY : e.clientY;
+}
+
+function onMouseDown(e)
+{
   if (!e.target.classList.contains("brick")) return;
   
   draggingElem = e.target;
-  startY = e.clientY;
+  startY = getClientY(e);
   startIndex = indexOfElement(draggingElem);
   currentIndex = startIndex;
 
   draggingElem.classList.add("dragging");
   document.addEventListener("mousemove", onMouseMove);
   document.addEventListener("mouseup", onMouseUp);
-});
+  document.addEventListener("touchmove", onMouseMove, { passive: false });
+  document.addEventListener("touchend", onMouseUp);
+}
+container.addEventListener("mousedown", onMouseDown);
+container.addEventListener("touchstart", onMouseDown, { passive: false }); // passive: false allows preventDefault()
 
 function onMouseMove(e) {
   if (!draggingElem) return;
 
-  const deltaY = e.clientY - startY;
+  const deltaY = getClientY(e) - startY;
   draggingElem.style.transform = `translateY(${deltaY}px)`;
 
   const all = [...container.children];
@@ -92,6 +101,8 @@ function onMouseUp() {
   draggingElem = null;
   document.removeEventListener("mousemove", onMouseMove);
   document.removeEventListener("mouseup", onMouseUp);
+  document.removeEventListener("touchmove", onMouseMove);
+  document.removeEventListener("touchend", onMouseUp);
 
   // Let the browser repaint first
   requestAnimationFrame(() => {
