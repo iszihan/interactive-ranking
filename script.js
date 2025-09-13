@@ -194,6 +194,28 @@ if (nextBtn) {
     const order = [...container.children]
       .map(div => (div.querySelector('img') || {}).src)
       .filter(Boolean);
-    console.log('Ranking:', order);
+    fetch('/api/next', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ranking: order })
+    }).then(r => r.json()).then(data => {
+      const images = data.images || [];
+      if (images.length) {
+        container.innerHTML = '';
+        for (const src of images) {
+          const div = document.createElement('div');
+          div.className = 'brick';
+          const img = document.createElement('img');
+          img.src = src;
+          img.alt = '';
+          img.style.maxWidth = '100%';
+          img.style.display = 'block';
+          div.appendChild(img);
+          container.appendChild(div);
+        }
+      }
+    }).catch(err => {
+      console.error('Next failed', err);
+    });
   });
 }
