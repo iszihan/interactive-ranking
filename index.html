@@ -7,17 +7,20 @@
 </head>
 <body>
   <div id=source><a href=https://github.com/alecjacobson/interactive-ranking>https://github.com/alecjacobson/interactive-ranking</a></div>
-  <div id="container">
-  <div class="brick" style="background: #F2916E;">2</div>
-  <div class="brick" style="background: #59C792;">5</div>
-  <div class="brick" style="background: #D293E0;">9</div>
-  <div class="brick" style="background: #A4BA57;">4</div>
-  <div class="brick" style="background: #D8A443;">3</div>
-  <div class="brick" style="background: #58B8F6;">7</div>
-  <div class="brick" style="background: #EF8AAB;">1</div>
-  <div class="brick" style="background: #00C6CE;">6</div>
-  <div class="brick" style="background: #9EA4FD;">8</div>
-</div>
+  <div id="controls">
+    <button id="startBtn">Start</button>
+    <span id="status"></span>
+  </div>
+
+  <div id="gallery" class="hidden"></div>
+
+  <div id="nextWrap" class="hidden">
+    <button id="nextBtn">Next</button>
+  </div>
+
+  <div id="rankSection" class="hidden">
+    <div id="container"></div>
+  </div>
 </body>
 </html>
 
