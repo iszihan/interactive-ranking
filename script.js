@@ -13,6 +13,7 @@ let draggingElem = null;
 let startX = 0;
 let startIndex = 0;
 let currentIndex = 0;
+let imagesPollHandle = null;
 
 function indexOfElement(el) {
   return [...container.children].indexOf(el);
@@ -150,7 +151,7 @@ async function startProcess() {
       const div = document.createElement('div');
       div.className = 'brick';
       const img = document.createElement('img');
-      img.src = src;
+      img.src = `${src}?v=${Date.now()}`;
       img.alt = '';
       img.style.maxWidth = '100%';
       img.style.display = 'block';
@@ -190,32 +191,67 @@ function buildRankingFromImages() {
 
 if (nextBtn) {
   nextBtn.addEventListener('click', () => {
-    // Capture current ranking (left-to-right)
     const order = [...container.children]
       .map(div => (div.querySelector('img') || {}).src)
       .filter(Boolean);
+
+    nextBtn.disabled = true;
+    statusEl.textContent = 'Generating next images...';
+    container.innerHTML = '';
+
+    startPollingImages(5000);  // slower polling
+
     fetch('/api/next', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ranking: order })
     }).then(r => r.json()).then(data => {
-      const images = data.images || [];
-      if (images.length) {
+      stopPollingImages();     // stop when next() is done
+      statusEl.textContent = `Loaded ${data.images?.length || 0} images`;
+      nextBtn.disabled = false;
+    }).catch(err => {
+      console.error('Next failed', err);
+      nextBtn.disabled = false;
+      stopPollingImages();
+    });
+  });
+}
+
+function startPollingImages(intervalMs = 5000) {
+  if (imagesPollHandle) clearInterval(imagesPollHandle);
+  const tick = () => {
+    fetch('/api/images', { cache: 'no-store' })
+      .then(r => r.json())
+      .then(data => {
+        const images = data.images || [];
         container.innerHTML = '';
+        container.style.display = 'flex';
+        container.style.flexDirection = 'row';
+        container.style.flexWrap = 'nowrap';
+        container.style.gap = '12px';
+        container.style.overflowX = 'auto';
         for (const src of images) {
           const div = document.createElement('div');
           div.className = 'brick';
           const img = document.createElement('img');
-          img.src = src;
+          img.src = `${src}?v=${Date.now()}`;
           img.alt = '';
           img.style.maxWidth = '100%';
           img.style.display = 'block';
           div.appendChild(img);
           container.appendChild(div);
         }
-      }
-    }).catch(err => {
-      console.error('Next failed', err);
-    });
-  });
+        statusEl.textContent = images.length ? `Loaded ${images.length} images` : 'Waiting for images...';
+      })
+      .catch(() => {});
+  };
+  tick();
+  imagesPollHandle = setInterval(tick, intervalMs);
+}
+
+function stopPollingImages() {
+  if (imagesPollHandle) {
+    clearInterval(imagesPollHandle);
+    imagesPollHandle = null;
+  }
 }
