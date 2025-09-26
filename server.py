@@ -350,6 +350,7 @@ def next_step(req: NextRequest) -> JSONResponse:
         if name:
             basenames.append(name)
 
+    print('Ranking received:', basenames)
     engine.next(basenames)
 
     images = _list_image_urls()
