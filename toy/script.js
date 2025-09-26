@@ -23,12 +23,11 @@ function getClientX(e) {
   return e.touches ? e.touches[0].clientX : e.clientX;
 }
 
-function onMouseDown(e)
-{
+function onMouseDown(e) {
   const brick = e.target.closest('.brick');
   if (!brick) return;
   e.preventDefault();
-  
+
   draggingElem = brick;
   startX = getClientX(e);
   startIndex = indexOfElement(draggingElem);
@@ -53,7 +52,7 @@ function onMouseMove(e) {
   const all = [...container.children];
   const others = all.filter(el => el !== draggingElem);
 
-  
+
   // Get the middle X position of the dragging element
   function middle(el) {
     const rect = el.getBoundingClientRect();
@@ -162,6 +161,8 @@ async function startProcess() {
     rankSection.classList.remove('hidden');
     nextWrap.classList.remove('hidden');
     statusEl.textContent = images.length ? `Loaded ${images.length} images` : 'No images returned';
+    expected = 10;
+    setTilesPerRow(images.length || 10);
   } catch (err) {
     statusEl.textContent = 'Error: ' + (err && err.message ? err.message : 'unknown');
   } finally {
@@ -188,8 +189,10 @@ function renderPlaceholders(n) {
 
     const overlay = document.createElement('div');
     overlay.className = 'loading';
-    overlay.innerHTML = `<div style="display:flex;align-items:center;">
-        <div class="spinner"></div> Loading…
+    overlay.innerHTML = `
+      <div class="loading-wrap">
+        <div class="spinner" aria-hidden="true"></div>
+        <div class="label">Generating…</div>
       </div>`;
     brick.appendChild(overlay);
 
@@ -201,23 +204,38 @@ function getSlotEl(slot) {
   return container.querySelector(`.brick[data-slot="${slot}"]`);
 }
 
-function setSlotImage(slot, round) {
+async function setSlotImage(slot, round) {
   const brick = getSlotEl(slot);
   if (!brick) return;
   const img = brick.querySelector('img');
   const overlay = brick.querySelector('.loading');
 
-  const url = `/outputs/slots/slot-${slot}.png?v=${round}`;
-  img.src = url;
+  // fetch the file explicitly so we control timing & cache
+  const url = `/outputs/slots/slot-${slot}.png?v=${round}&t=${Date.now()}`;
+  try {
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const objURL = URL.createObjectURL(blob);
 
-  // ensure the bitmap is decoded before hiding the overlay
-  const onReady = () => { overlay.style.display = 'none'; };
-  if (img.decode) {
-    img.decode().then(onReady).catch(() => onReady());
-  } else {
-    img.onload = onReady;
-    img.onerror = () => { overlay.textContent = 'Failed'; };
+    img.src = objURL;
+    if (img.decode) { try { await img.decode(); } catch (_) { } }
+
+    overlay.style.display = 'none';     // hide just this slot’s loader
+    URL.revokeObjectURL(objURL);
+  } catch (e) {
+    overlay.textContent = 'Failed';
+    console.error('slot fetch failed', slot, e);
   }
+}
+
+function setTilesPerRow(N){
+  console.log('setTilesPerRow', N);
+  const gap = parseFloat(getComputedStyle(container).getPropertyValue('--gap')) || 12;
+  const W = container.clientWidth || container.offsetWidth || window.innerWidth;
+  const basis = Math.floor(80 / N);   // px per tile
+  document.documentElement.style.setProperty('--tile-ideal', `${basis}vw`);
+  console.log('--tile-ideal', basis);
 }
 
 // ---- SSE push channel (no polling) ---------------------------------
@@ -229,29 +247,25 @@ let received = 0;
 
 es.addEventListener('begin', (ev) => {
   const { round, n } = JSON.parse(ev.data);
-  currentRound = round;
-  expected = n;
-  received = 0;
-
-  renderPlaceholders(n);              // <-- create 6 loading slots
-  if (rankSection) rankSection.classList.add('hidden');
+  currentRound = round; expected = n; received = 0;
+  renderPlaceholders(n);                            // creates 6 “Loading…” slots
+  setTilesPerRow(n);
   statusEl.textContent = `Generating… (0/${expected})`;
 });
+window.addEventListener('resize', () => setTilesPerRow(expected));
 
 es.addEventListener('slot', (ev) => {
   const { round, slot } = JSON.parse(ev.data);
-  if (round !== currentRound) return; // ignore stale
-  setSlotImage(slot, round);          // <-- fill this slot only
+  if (round !== currentRound) return;
+  setSlotImage(slot, round);                        // fetch & reveal this slot
   received += 1;
   statusEl.textContent = `Loaded ${received}/${expected}`;
 });
 
 es.addEventListener('done', (ev) => {
-  const { round } = JSON.parse(ev.data);
-  if (round !== currentRound) return;
+  if (JSON.parse(ev.data).round !== currentRound) return;
   statusEl.textContent = `Loaded ${received}/${expected}`;
   if (nextBtn) nextBtn.disabled = false;
-  if (rankSection) rankSection.classList.remove('hidden');
 });
 
 es.onerror = () => {

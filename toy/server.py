@@ -34,7 +34,7 @@ app = FastAPI()
 
 def _make_rank_png_bytes(step: int, i: int, name: str) -> bytes:
     """Sync helper (runs in thread) to build the PNG bytes."""
-    time.sleep(1.0)
+    time.sleep(3.0)
     img = Image.new("RGB", (200, 200), (220, 240, 255))
     d = ImageDraw.Draw(img)
     d.text((20, 80), f"Step {step} Rank {i+1}: {name}", fill=(0, 0, 0))
@@ -203,9 +203,21 @@ async def events():
     async def gen():
         while True:
             kind, payload = await engine._events.get()
-            yield f"event: {kind}\n"
-            yield f"data: {json.dumps(payload)}\n\n"
-    return StreamingResponse(gen(), media_type="text/event-stream")
+            chunk = f"event: {kind}\n" \
+                    f"data: {json.dumps(payload)}\n\n"
+            # yield bytes and yield control so uvicorn flushes immediately
+            yield chunk.encode("utf-8")
+            await asyncio.sleep(0)
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # if ever behind nginx
+        },
+    )
+
 
 
 if __name__ == "__main__":
