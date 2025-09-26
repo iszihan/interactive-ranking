@@ -230,12 +230,8 @@ async function setSlotImage(slot, round) {
 }
 
 function setTilesPerRow(N){
-  console.log('setTilesPerRow', N);
-  const gap = parseFloat(getComputedStyle(container).getPropertyValue('--gap')) || 12;
-  const W = container.clientWidth || container.offsetWidth || window.innerWidth;
-  const basis = Math.floor(80 / N);   // px per tile
+  const basis = Math.floor(80 / N);   // vw (ratio) per tile
   document.documentElement.style.setProperty('--tile-ideal', `${basis}vw`);
-  console.log('--tile-ideal', basis);
 }
 
 // ---- SSE push channel (no polling) ---------------------------------
