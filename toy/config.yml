@@ -1,0 +1,30 @@
+# config.yml
+
+# How many observations to use for the initial phase
+# num_observations: 10
+num_observations: 5
+num_observations_per_step: 3
+
+# Hard upper bound you enforce later
+max_num_observations: 20
+
+# Optional: directory with any initial assets/records you want to load
+# init_dir: "./init_candidates"
+
+# Global RNG seed used when step == 0
+seed: 0
+
+# Ground-truth spec:
+#   "<prompt text>@<component_a>:<weight_a>, <component_b>:<weight_b>, ..."
+# Component names should match your LoRA/component IDs.
+# Weights don't have to sum to 1 (you clamp/normalize later if needed),
+# but it's a good habit to keep them within [0,1].
+gt_config: "'A portrait of a woman'@/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/838909.safetensors:0,/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/661736.safetensors:0.6,/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/74776.safetensors:0,/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/154792.safetensors:0.4,/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/453731.safetensors:0"
+
+# Negative prompt passed into infer/infer_image_img2img
+negative_prompt: "easynegative, 3d, realistic, badhandv4, (lowres,  bad quality),  (worst quality,  low quality:1.3),  blurry,  cropped,  out of frame,  border,  bad hands,  interlocked fingers,  mutated hands,  (Bad anatomy:1.4),  from afar,  warped,  (deformed,  disfigured:1.1),  twisted torso,  mutated limbs"
+
+# Inference settings (used for both control and GT generation)
+infer_width: 1024
+infer_height: 1024
+infer_steps: 20

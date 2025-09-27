@@ -272,7 +272,7 @@ class Engine:
                 output_dir, f'init_{weights_str}.png')
             if os.path.exists(image_path):
                 print(f"image {image_path} already exists, skipping inference.")
-                img = image.open(image_path)
+                img = Image.open(image_path)
         
         if img is None:
             if control_img is None:
