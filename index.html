@@ -2,14 +2,16 @@
 <html lang="en">
 <head>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="stylesheet" href=style.css>
-  <script src="script.js?v=2" defer></script>
+  <link rel="stylesheet" href=/static/style.css>
+  <script src="/static/script.js" defer></script>
 </head>
 <body>
-  <div id=source><a href=https://github.com/alecjacobson/interactive-ranking>https://github.com/alecjacobson/interactive-ranking</a></div>
+  <div id=source>
+    <span id="status"></span>
+    <a href=https://github.com/alecjacobson/interactive-ranking>https://github.com/alecjacobson/interactive-ranking</a>
+  </div>
   <div id="controls">
     <button id="startBtn">Start</button>
-    <span id="status"></span>
   </div>
 
   <div id="gallery" class="hidden"></div>
@@ -23,13 +25,3 @@
   </div>
 </body>
 </html>
-
-
-
-
-
-
-
-
-
-

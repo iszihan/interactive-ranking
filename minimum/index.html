@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Server-Generated Image</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; }
+    #viewer { position: relative; display: inline-block; width: 640px; height: 360px; }
+    #viewer img { max-width: 100%; border-radius: 12px; display: none; }
+    .loading {
+      position: absolute; inset: 0;
+      display: grid; place-items: center;
+      background: rgba(255,255,255,0.85);
+      font-weight: 600;
+      border-radius: 12px;
+    }
+    .spinner {
+      width: 28px; height: 28px;
+      border: 3px solid #999; border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin-right: .6rem;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #controls { margin-top: 1rem; }
+    button { padding: .6rem 1rem; border: 0; border-radius: 999px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Server-Generated Image</h1>
+
+  <div id="viewer">
+    <img id="img" alt="generated" />
+    <div class="loading" id="loading">
+      <div style="display:flex; align-items:center;">
+        <div class="spinner"></div> Loading…
+      </div>
+    </div>
+  </div>
+
+  <div id="controls">
+    <button id="regen">Generate</button>
+  </div>
+
+  <script>
+    const imgEl = document.getElementById('img');
+    const loadingEl = document.getElementById('loading');
+    const regenBtn = document.getElementById('regen');
+
+    async function loadImage() {
+      loadingEl.style.display = 'grid';
+      imgEl.style.display = 'none';
+      imgEl.removeAttribute('src'); // clears old/broken src
+
+      try {
+        const res = await fetch(`/generate?ts=${Date.now()}`, { cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+
+        // Wait until fully decoded
+        imgEl.src = url;
+        if (imgEl.decode) {
+          await imgEl.decode();
+        } else {
+          await new Promise(r => imgEl.onload = r);
+        }
+
+        loadingEl.style.display = 'none';
+        imgEl.style.display = 'block';
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        console.error(e);
+        loadingEl.textContent = 'Failed to load image.';
+      }
+    }
+
+    regenBtn.addEventListener('click', loadImage);
+    // initial load
+    loadImage();
+  </script>
+</body>
+</html>
