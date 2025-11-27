@@ -8,10 +8,27 @@
 <body>
   <div id=source>
     <span id="status"></span>
-    <a href=https://github.com/alecjacobson/interactive-ranking>https://github.com/alecjacobson/interactive-ranking</a>
+    <!-- <a href=https://github.com/alecjacobson/interactive-ranking>https://github.com/alecjacobson/interactive-ranking</a> -->
   </div>
   <div id="controls">
     <button id="startBtn">Start</button>
+  </div>
+
+  <div id="referenceSection" class="hidden">
+    <div id="referenceRow">
+      <div class="reference-card">
+        <div class="reference-label">Match this image:</div>
+        <div class="reference-brick">
+          <img id="referenceImg" alt="Target reference" />
+        </div>
+      </div>
+      <div id="zoomSection" class="reference-card hidden">
+        <div class="zoom-label">Selected image:</div>
+        <div class="zoom-brick">
+          <img id="zoomImg" alt="Zoomed selection" />
+        </div>
+      </div>
+    </div>
   </div>
 
   <div id="gallery" class="hidden"></div>
@@ -21,6 +38,10 @@
   </div>
 
   <div id="rankSection" class="hidden">
+    <div class="rank-labels">
+      <span class="rank-label rank-label-left">Closest</span>
+      <span class="rank-label rank-label-right">Farthest</span>
+    </div>
     <div id="container"></div>
   </div>
 </body>

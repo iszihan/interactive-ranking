@@ -7,18 +7,39 @@ const nextBtn = document.getElementById("nextBtn");
 const nextWrap = document.getElementById("nextWrap");
 const rankSection = document.getElementById("rankSection");
 const controls = document.getElementById("controls");
+const referenceSection = document.getElementById("referenceSection");
+const referenceImg = document.getElementById("referenceImg");
+const zoomSection = document.getElementById("zoomSection");
+const zoomImg = document.getElementById("zoomImg");
 
 // hide Next/ranking initially
 if (nextWrap) nextWrap.classList.add("hidden");
 if (rankSection) rankSection.classList.add("hidden");
+if (referenceSection) referenceSection.classList.add("hidden");
 
 // ---------- drag-to-reorder ----------
 let draggingElem = null;
 let startX = 0;
 let startIndex = 0;
 let currentIndex = 0;
+let lastInteractionWasDrag = false;
+let selectedBrick = null;
+const DRAG_THRESHOLD_PX = 5;
 
 const SLOTS_BASE = "/slots"; // make sure this matches server
+
+function updateReferenceImage(src) {
+  if (!referenceSection || !referenceImg) return;
+  if (!src) {
+    referenceImg.removeAttribute("src");
+    referenceSection.classList.add("hidden");
+    return;
+  }
+  const canonical = src.split("?")[0];
+  referenceImg.dataset.src = canonical;
+  referenceImg.src = `${canonical}?v=${Date.now()}`;
+  referenceSection.classList.remove("hidden");
+}
 
 function indexOfElement(el) { return [...container.children].indexOf(el); }
 function getClientX(e) { return e.touches ? e.touches[0].clientX : e.clientX; }
@@ -27,6 +48,7 @@ function onMouseDown(e) {
   const brick = e.target.closest(".brick");
   if (!brick) return;
   e.preventDefault();
+  lastInteractionWasDrag = false;
 
   draggingElem = brick;
   startX = getClientX(e);
@@ -47,6 +69,9 @@ function onMouseMove(e) {
   if (!draggingElem) return;
 
   const deltaX = getClientX(e) - startX;
+  if (!lastInteractionWasDrag && Math.abs(deltaX) > DRAG_THRESHOLD_PX) {
+    lastInteractionWasDrag = true;
+  }
   draggingElem.style.transform = `translateX(${deltaX}px)`;
 
   const all = [...container.children];
@@ -82,6 +107,10 @@ function reorderGhosts() {
 }
 
 function onMouseUp() {
+  if (!draggingElem) return;
+
+  const droppedBrick = draggingElem;
+  const wasDrag = lastInteractionWasDrag;
   const bricks = [...container.children].filter(el => el !== draggingElem);
   bricks.forEach(b => { b.style.transform = ""; b.classList.add("resetting"); });
 
@@ -102,7 +131,43 @@ function onMouseUp() {
       bricks.forEach(b => b.classList.remove("resetting"));
     });
   });
+
+  if (!wasDrag) {
+    showZoomForBrick(droppedBrick);
+  }
+
+  lastInteractionWasDrag = false;
 }
+
+function clearZoomSelection() {
+  if (selectedBrick) selectedBrick.classList.remove("selected");
+  selectedBrick = null;
+  if (zoomImg) {
+    zoomImg.removeAttribute("src");
+    zoomImg.removeAttribute("data-src");
+  }
+  if (zoomSection) zoomSection.classList.add("hidden");
+}
+
+function showZoomForBrick(brick) {
+  if (!brick || !zoomImg || !zoomSection) return;
+  const img = brick.querySelector("img");
+  if (!img || !img.src) return;
+
+  if (selectedBrick && selectedBrick !== brick) {
+    selectedBrick.classList.remove("selected");
+  }
+  selectedBrick = brick;
+  selectedBrick.classList.add("selected");
+
+  const canonical = (img.dataset && img.dataset.src) ? img.dataset.src : img.src;
+  const zoomSrc = img.currentSrc || img.src;
+  zoomImg.src = zoomSrc;
+  zoomImg.dataset.src = canonical;
+  zoomSection.classList.remove("hidden");
+}
+
+// selection happens on mouse/touch release (see onMouseUp)
 
 // ---------- layout helpers ----------
 function setTilesPerRow(N) {
@@ -120,10 +185,12 @@ async function startProcess() {
     if (!resp.ok) throw new Error("start failed");
     const data = await resp.json();
     const images = data.images || [];
+    updateReferenceImage(data.gt_image);
 
     if (controls) controls.classList.add("hidden");
 
     container.innerHTML = "";
+    clearZoomSelection();
     container.style.display = "flex";
     container.style.flexDirection = "row";
     container.style.flexWrap = "nowrap";
@@ -157,6 +224,7 @@ async function startProcess() {
     setTilesPerRow(images.length || 6);
   } catch (err) {
     statusEl.textContent = "Error: " + (err && err.message ? err.message : "unknown");
+    updateReferenceImage(null);
   } finally {
     startBtn.disabled = false;
   }
@@ -167,6 +235,7 @@ if (startBtn) startBtn.addEventListener("click", startProcess);
 // ---------- placeholders + per-slot reveal ----------
 function renderPlaceholders(n) {
   container.innerHTML = "";
+  clearZoomSelection();
   container.style.display = "flex";
   container.style.gap = "12px";
   container.style.overflowX = "auto";
@@ -204,6 +273,10 @@ async function setSlotImage(slot, round) {
 
   if (img.decode) { try { await img.decode(); } catch { } }
   overlay.style.display = "none";
+
+  if (selectedBrick === brick) {
+    showZoomForBrick(brick);
+  }
 }
 
 // ---------- SSE (push) ----------
