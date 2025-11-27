@@ -1,4 +1,6 @@
 # server_bo.py
+import signal
+import atexit
 from urllib.parse import urlparse
 from fastapi.responses import JSONResponse
 from pathlib import Path
@@ -11,6 +13,8 @@ import os
 import yaml
 import copy
 from itertools import combinations
+
+import multiprocessing
 
 import pytorch_lightning as pl
 import torch
@@ -30,7 +34,8 @@ from helper.sampler import sample_dirichlet_simplex
 from helper.build_clusters import build_cluster_hierarchy, find_images_for_folders, build_tree
 from search_benchmark.multi_solvers import break_clusters_even
 from search_benchmark.comparison_solvers import fit_gpytorch_pair_model, pairwise_to_single_task, generate_comparisons, generate_comparisons_index
-from engine import obj_sim, infer_image_img2img, prepare_init_obs, prepare_init_obs_simplex, infer_image
+from engine import (obj_sim, infer_image_img2img,
+                    prepare_init_obs, prepare_init_obs_simplex, infer_image)
 
 from botorch.acquisition import (
     qUpperConfidenceBound)
@@ -41,8 +46,8 @@ from search_benchmark.acq_prior import (
     qSimplexUpperConfidenceBound,
     stick_breaking_transform, inverse_stick_breaking_transform
 )
-from helper.sampler import qmc_simplex_generator
-from helper.sampler import get_mcmc_from_cache
+from helper.sampler import qmc_simplex_generator, get_mcmc_from_cache
+from async_multi_gpu_pool import MultiGPUInferPool
 
 CONFIG_FILE = Path(__file__).parent.resolve() / "config.yml"
 
@@ -61,6 +66,19 @@ app = FastAPI()
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # helpers ------------------------------------------------------------
+
+
+@app.on_event("startup")
+async def _init_engine_once():
+    global engine
+    if engine is None:
+        engine = Engine(CONFIG_FILE, OUTPUT_DIR)
+
+
+@app.on_event("shutdown")
+async def _shutdown_engine_pool():
+    if engine and engine.gpu_pool:
+        engine.gpu_pool.shutdown()
 
 
 def _make_rank_png_bytes(step: int, i: int, name: str) -> bytes:
@@ -90,7 +108,7 @@ def ranking2pairs(ranked_indices):
         comp_pairs.append(
             (ranked_indices[i], ranked_indices[j])
         )
-    
+
     return comp_pairs
 
 
@@ -108,6 +126,9 @@ class Engine:
         self._events = asyncio.Queue()
 
         self.last_selected_basename = None
+        self.gpu_pool: MultiGPUInferPool | None = None
+        self.worker_state_template: dict | None = None
+        self._pool_warmed = False
 
         # Read config_path (yml)
         with open(config_path, 'r') as f:
@@ -143,6 +164,16 @@ class Engine:
                 self.alpha_config_base = alpha_raw.get(
                     'alpha_search', alpha_raw)
 
+        # Support for multi-GPU inference
+        # gpu_ids: 0,1
+        gpu_ids = config.get('gpu_ids', '')
+        gpu_ids = [int(gid.strip())
+                   for gid in str(gpu_ids).split(',') if gid.strip().isdigit()]
+        if gpu_ids:
+            self.gpu_pool = MultiGPUInferPool(
+                gpu_ids=gpu_ids,
+                module_name="engine_worker")
+
         pl.seed_everything(self.seed)
 
         # Parse prompt and components
@@ -155,7 +186,7 @@ class Engine:
             comp, weight = component.split(':')
             self.component_weights.append(
                 [comp.strip(), float(weight.strip())])
-            
+
         self.alpha_context = None
         if self.alpha_config_base:
             self.alpha_context = copy.deepcopy(self.alpha_config_base)
@@ -175,8 +206,8 @@ class Engine:
                     meta['image_dir'] = str(
                         Path(comp_path).with_suffix(''))
 
-        control_img_path = os.path.join(WORKING_DIR, 'control.png')
-        if not os.path.exists(control_img_path):
+        control_img_path = WORKING_DIR / 'control.png'
+        if not control_img_path.exists():
             # infer an image with baseline model as control
             print(f'control image inference, {self.prompt}')
             random_seed = 194850943985
@@ -195,8 +226,9 @@ class Engine:
             images[0].save(control_img_path)
             print(f'Saved control image to {control_img_path}')
         else:
-            self.control_img = np.array(load_image(control_img_path))
+            self.control_img = np.array(load_image(str(control_img_path)))
             print(f'Loaded control image from {control_img_path}')
+        self.control_img_path = str(control_img_path)
 
         self.x_range = (0.0, 1.0)
         self.gt_image_path = None
@@ -229,6 +261,7 @@ class Engine:
                                  output_dir=OUTPUT_DIR, to_vis=True, is_init=False, control_img=self.control_img)
 
         self.f = f
+        self.worker_state_template = self._make_worker_state_template()
 
     def infer_img_func(self, component_weights, image_path=None, control_img=None):
         return infer_image_img2img(component_weights,
@@ -250,11 +283,113 @@ class Engine:
             infer_height=self.infer_height,
             image_path=image_path)[0]
 
+    def _make_worker_state_template(self) -> dict:
+        return {
+            "gt_image_path": self.gt_image_path,
+            "component_weights": copy.deepcopy(self.component_weights),
+            "prompt": self.prompt,
+            "negative_prompt": self.negative_prompt,
+            "infer_steps": self.infer_steps,
+            "infer_width": self.infer_width,
+            "infer_height": self.infer_height,
+            "output_dir": str(self.outputs_dir),
+            "control_img_path": self.control_img_path,
+            "weight_idx": 1,
+        }
+
+    def _build_worker_payload(self, x_vector: np.ndarray) -> dict:
+        state = copy.deepcopy(self.worker_state_template or {})
+        return {
+            "state": state,
+            "x": x_vector.tolist(),
+        }
+
+    def _warmup_gpu_pool(self) -> None:
+        if not self.gpu_pool or self._pool_warmed:
+            return
+
+        print("Warming up GPU inference workers...")
+        warm_dir = self.outputs_dir / "warmup"
+        warm_dir.mkdir(parents=True, exist_ok=True)
+
+        base_weights = np.full(len(self.component_weights), 1.0 /
+                               max(1, len(self.component_weights)), dtype=np.float32)
+
+        pending = set()
+        for _ in range(len(self.gpu_pool.procs)):
+            # Randomly alter weights slightly per GPU to avoid caching effects
+            base_weights_gpu = base_weights + \
+                np.random.normal(0, 0.01, size=base_weights.shape)
+            base_weights_gpu = np.clip(base_weights_gpu, 0, 1)
+            base_weights_gpu = base_weights_gpu / np.sum(base_weights_gpu)
+
+            payload = self._build_worker_payload(base_weights_gpu)
+            payload["state"]["output_dir"] = str(warm_dir)
+            job_id = self.gpu_pool.submit(
+                "worker_make_generation", {"payload": payload})
+            pending.add(job_id)
+
+        try:
+            while pending:
+                job_id, _, err = self.gpu_pool.get_result()
+                if job_id not in pending:
+                    # could be unrelated task; requeue by storing
+                    # For now, ignore since warmup happens before other tasks
+                    continue
+                pending.remove(job_id)
+                if err is not None:
+                    raise err
+        finally:
+            shutil.rmtree(warm_dir, ignore_errors=True)
+
+        self._pool_warmed = True
+
+    async def _finalize_slot(self, slot_idx: int, idx: int, data: bytes, x_vector: np.ndarray, round_id: int):
+        out_path = SLOTS_DIR / f"slot-{slot_idx}.png"
+        await asyncio.to_thread(out_path.write_bytes, data)
+        await self._events.put(("slot", {"round": round_id, "slot": slot_idx}))
+        self.x_record[out_path.name] = (x_vector, int(idx))
+
+    async def _generate_with_pool(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int):
+        pending: dict[int, tuple[int, int]] = {}
+        for i in range(new_x.shape[0]):
+            x_trial = new_x[i]
+            if isinstance(x_trial, torch.Tensor):
+                x_trial = x_trial.detach().cpu().numpy()
+            idx = new_I[i]
+            payload = self._build_worker_payload(x_trial)
+            job_id = self.gpu_pool.submit(
+                "worker_make_generation", {"payload": payload})
+            pending[job_id] = (i, idx)
+
+        while pending:
+            job_id, result, err = await asyncio.to_thread(self.gpu_pool.get_result)
+            slot_idx, idx = pending.pop(job_id)
+            if err is not None:
+                raise err
+            data = result["data"]
+            if isinstance(data, memoryview):
+                data = data.tobytes()
+            x_vec = np.array(result["x"], dtype=np.float64)
+            new_y[slot_idx] = float(result["sim_val"])
+            await self._finalize_slot(slot_idx, idx, data, x_vec, round_id)
+
+    async def _generate_in_process(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int):
+        for i in range(new_x.shape[0]):
+            x_trial = new_x[i]
+            if isinstance(x_trial, torch.Tensor):
+                x_trial = x_trial.detach().cpu().numpy()
+            idx = new_I[i]
+            data, x_vec, y = await asyncio.to_thread(_make_generation, self, x_trial)
+            new_y[i] = float(np.asarray(y).flatten()[0])
+            await self._finalize_slot(i, idx, data, x_vec, round_id)
+
     def get_gt_image_url(self) -> str | None:
         if not self.gt_image_path:
             return None
         try:
-            rel = Path(self.gt_image_path).resolve().relative_to(self.outputs_dir.resolve())
+            rel = Path(self.gt_image_path).resolve(
+            ).relative_to(self.outputs_dir.resolve())
         except ValueError:
             return None
         # normalize to forward slashes for URLs
@@ -313,6 +448,12 @@ class Engine:
         self.x_observations, x_record = prepare_init_obs_simplex(self.num_observations, len(
             self.component_weights), self.f_init, seed=self.seed, sparse_threshold=0.1, sampler=sample_dirichlet_simplex)
         self.x_record = x_record
+        
+        # Warmup GPU pool
+        print("Warming up GPU pool...")
+        self._warmup_gpu_pool()
+        
+        print("Engine started.")
 
     def build_tree(self):
         # Build LoRA tree
@@ -476,19 +617,19 @@ class Engine:
             self.I = [0 for _ in range(self.train_X.shape[0])]
 
             self.last_past_indices = []
-        
+
         print(f'self.train_X: {self.train_X}')
-        
+
         ranked_indices = [
             self.x_record[Path(img_name).name][1] for img_name in ranking_basenames]
         comp_pairs = ranking2pairs(ranked_indices)
         print(f'ranked_indices: {ranked_indices}')
-        
+
         comp_pairs = torch.tensor(comp_pairs, dtype=torch.long).to(device)
         pairwise_gp = fit_gpytorch_pair_model(self.train_X, comp_pairs)
         gp, latent_Y = pairwise_to_single_task(
             self.train_X, self.Y, pairwise_gp)
-         
+
         print(f'ranked_indices: {ranked_indices}')
 
         print('Acquiring GP...')
@@ -502,7 +643,8 @@ class Engine:
             post = pairwise_gp.posterior(new_x)
             new_latent_Y = post.mean.squeeze(-1).unsqueeze(-1)  # shape (n,1)
         # Sort new_x based on estimated latent Y values (higher is better)
-        ranked_new_indices = torch.argsort(-new_latent_Y, dim=0)  # descending order
+        # descending order
+        ranked_new_indices = torch.argsort(-new_latent_Y, dim=0)
         ranked_new_indices = ranked_new_indices.flatten()
         new_x = new_x[ranked_new_indices]
 
@@ -510,7 +652,7 @@ class Engine:
         new_I = [ranked_indices[0]] + \
             [self.train_X.shape[0] + i for i in range(new_x.shape[0])]
         self.train_X = torch.cat([self.train_X, new_x], dim=0)
-         
+
         # Add the current best to the beginning of new_x
         selected_x = self.x_record[img_name][0]
         if isinstance(selected_x, np.ndarray):
@@ -518,7 +660,7 @@ class Engine:
         new_x = torch.vstack([selected_x, new_x])
 
         self.path.append(selected_x)
-            
+
         # --- slider setup ---
         n = min(limit or self.num_observations_per_step + 1,
                 self.num_observations_per_step + 1)
@@ -534,36 +676,14 @@ class Engine:
 
         # Iterate and generate each slot given new_x
         new_y = [0 for _ in range(new_x.shape[0])]
-        for i in range(new_x.shape[0]):
-            # Prepare trial point (pure NumPy = sync/fast)
-            x_trial = new_x[i]
-            if isinstance(x_trial, torch.Tensor):
-                x_trial = x_trial.detach().cpu().numpy()
-            idx = new_I[i]
-
-            # Heavy generation (PIL/torch/etc.) – run in worker thread
-            # NOTE: pass `self` (engine) into _make_generation; avoid global `engine`
-            # <-- await
-            data, x, y = await asyncio.to_thread(_make_generation, self, x_trial)
-            new_y[i] = y
-
-            # Write PNG bytes to the fixed slot path (file I/O in thread)
-            out_path = SLOTS_DIR / f"slot-{i}.png"
-            await asyncio.to_thread(out_path.write_bytes, data)  # <-- await
-
-            # Notify this slot is ready
-            # <-- await
-            await self._events.put(("slot", {"round": round_id, "slot": i}))
-
-            # Record mapping for later lookups (tiny critical section)
-            out_name = out_path.name
-            # If other tasks read/write x_record concurrently, protect with a lock:
-            # async with self.x_lock:
-            self.x_record[out_name] = (x, int(idx))
+        if self.gpu_pool:
+            await self._generate_with_pool(new_x, new_I, new_y, round_id)
+        else:
+            await self._generate_in_process(new_x, new_I, new_y, round_id)
 
         new_y = new_y[1::]
         self.Y = torch.cat([self.Y, torch.from_numpy(
-            np.array(new_y)).double().to(device)], dim=0)
+            np.array(new_y).reshape(-1, 1)).double().to(device)], dim=0)
 
         # Tell clients the round finished
         await self._events.put(("done", {"round": round_id}))  # <-- await
@@ -571,7 +691,14 @@ class Engine:
         self.step += 1
 
 
-engine = Engine(CONFIG_FILE, OUTPUT_DIR)
+engine: Engine | None = None
+
+
+def _require_engine() -> Engine:
+    if engine is None:
+        raise RuntimeError("Engine is not initialized in this process.")
+    return engine
+
 
 app.mount("/static", StaticFiles(directory="."), name="static")
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
@@ -609,8 +736,9 @@ def images() -> JSONResponse:
 
 @app.post("/api/start")
 def start() -> JSONResponse:
-    engine.start()
-    gt_url = engine.get_gt_image_url()
+    eng = _require_engine()
+    eng.start()
+    gt_url = eng.get_gt_image_url()
 
     MIN_COUNT = 1          # how many images make a “batch”
     WAIT_TIMEOUT = 120.0
@@ -649,6 +777,7 @@ def extract_basename(s: str) -> str | None:
 
 @app.post("/api/next")
 async def next_step(req: NextRequest) -> JSONResponse:
+    eng = _require_engine()
     # IMPORTANT: do NOT clear the slots; optional: clear only historical outputs
     # If you want to keep a cleanup, make sure it doesn't touch SLOTS_DIR.
     # await asyncio.to_thread(engine.clear_outputs, keep_slots=True)
@@ -657,8 +786,8 @@ async def next_step(req: NextRequest) -> JSONResponse:
     basenames = [b for b in (extract_basename(x) for x in req.ranking) if b]
 
     # decide how many to generate
-    per_step = getattr(engine, "num_observations_per_step",
-                       engine.num_observations_per_step)
+    per_step = getattr(eng, "num_observations_per_step",
+                       eng.num_observations_per_step)
     per_step += 1
     n = min(req.n or len(basenames) or per_step, per_step)
 
@@ -668,21 +797,23 @@ async def next_step(req: NextRequest) -> JSONResponse:
     print("Ranking received:", basenames, "n:", n, "round:", round_id)
 
     # fire-and-forget generation; it must emit ("begin"/"slot"/"done") to SSE
-    asyncio.create_task(engine.next(basenames, round_id=round_id, limit=n))
+    asyncio.create_task(eng.next(basenames, round_id=round_id, limit=n))
 
     return JSONResponse({
         "round": round_id,
         "n": n,
         "accepted_ranking": basenames,
-        "selected_basename": getattr(engine, "last_selected_basename", None),
+        "selected_basename": getattr(eng, "last_selected_basename", None),
     })
 
 
 @app.get("/api/events")
 async def events():
+    eng = _require_engine()
+
     async def gen():
         while True:
-            kind, payload = await engine._events.get()   # must be a 2-tuple
+            kind, payload = await eng._events.get()   # must be a 2-tuple
             yield f"event: {kind}\n".encode()
             yield f"data: {json.dumps(payload)}\n\n".encode()
             await asyncio.sleep(0)  # flush
@@ -693,6 +824,46 @@ async def events():
                  "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
 
+# --- Robust GPU pool shutdown handlers (atexit + signals) ---
+
+
+def _shutdown_gpu_pool(from_signal=False):
+    """Safely shutdown the MultiGPUInferPool if initialized.
+
+    Args:
+        from_signal: whether invoked from a signal handler (affects log message).
+    """
+    if engine is None:
+        return
+    pool = engine.gpu_pool
+    if pool is not None:
+        try:
+            pool.shutdown()
+            print('[shutdown] MultiGPUInferPool terminated.' +
+                  (' (signal)' if from_signal else ''))
+        except Exception as e:
+            print(f'[shutdown] Failed to terminate GPU pool: {e}')
+        finally:
+            engine.gpu_pool = None  # prevent double shutdown
+
+
+def _register_shutdown_handlers():
+    # atexit covers normal interpreter termination
+    atexit.register(_shutdown_gpu_pool)
+
+    # Handle Ctrl+C and SIGTERM for early interruption
+    def _handler(signum, frame):
+        print(f'[signal] Caught signal {signum}; shutting down GPU pool...')
+        _shutdown_gpu_pool(from_signal=True)
+        raise SystemExit(128 + signum)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _handler)
+        except Exception as e:
+            print(f'[signal] Could not register handler for {sig}: {e}')
+
 
 if __name__ == "__main__":
+    _register_shutdown_handlers()
     uvicorn.run("server_bo:app", host="127.0.0.1", port=8000, reload=True)
