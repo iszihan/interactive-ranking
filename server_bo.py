@@ -250,6 +250,16 @@ class Engine:
             infer_height=self.infer_height,
             image_path=image_path)[0]
 
+    def get_gt_image_url(self) -> str | None:
+        if not self.gt_image_path:
+            return None
+        try:
+            rel = Path(self.gt_image_path).resolve().relative_to(self.outputs_dir.resolve())
+        except ValueError:
+            return None
+        # normalize to forward slashes for URLs
+        return f"/outputs/{rel.as_posix()}"
+
     def clear_outputs(self) -> None:
         for old in self.outputs_dir.glob("*"):
             try:
@@ -600,6 +610,7 @@ def images() -> JSONResponse:
 @app.post("/api/start")
 def start() -> JSONResponse:
     engine.start()
+    gt_url = engine.get_gt_image_url()
 
     MIN_COUNT = 1          # how many images make a “batch”
     WAIT_TIMEOUT = 120.0
@@ -608,11 +619,11 @@ def start() -> JSONResponse:
         images = _list_image_urls()
         if len(images) >= MIN_COUNT:
             print(f"Returning {len(images)} images from {OUTPUT_DIR}")
-            return JSONResponse({"images": images}, headers={"Cache-Control": "no-store"})
+            return JSONResponse({"images": images, "gt_image": gt_url}, headers={"Cache-Control": "no-store"})
         time.sleep(0.2)  # small sleep to avoid busy-wait
 
     # timed out (engine failed or took too long)
-    return JSONResponse({"status": "pending", "images": []}, status_code=202)
+    return JSONResponse({"status": "pending", "images": [], "gt_image": gt_url}, status_code=202)
 
 
 class NextRequest(BaseModel):

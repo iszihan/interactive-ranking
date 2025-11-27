@@ -9,16 +9,138 @@
 
 body{
   margin: 0;
-  padding-top: 50px;
+  padding-top: 36px;
+  padding-bottom: 140px; /* leave breathing room for fixed Next button */
   background: #f4f4f4;
   font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
 }
 
 .hidden{ display: none !important; }
 
 #controls{ margin-bottom: 16px; }
+
+#controls button,
+#nextWrap button{
+  appearance: none;
+  border: 1px solid #3C6AD9;
+  background: #4F8EF7;
+  color: #fff;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 12px 28px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+
+#controls button:hover,
+#nextWrap button:hover{
+  background: #405ccb;
+  border-color: #405ccb;
+}
+
+#controls button:active,
+#nextWrap button:active{
+  transform: scale(0.98);
+}
+
+#controls button:disabled,
+#nextWrap button:disabled{
+  background: #c6d2f3;
+  border-color: #c6d2f3;
+  cursor: not-allowed;
+  color: #fff;
+}
+
+#referenceSection{
+  width: min(92vw, 920px);
+  margin: 0 auto;
+}
+
+#referenceRow{
+  display: flex;
+  gap: 18px;
+  justify-content: center;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.reference-card{
+  flex: 0 0 clamp(240px, 32vw, 360px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.reference-label,
+.zoom-label{
+  font-size: 0.95rem;
+  color: #333;
+  letter-spacing: 0.08em;
+  /* text-transform: uppercase; */
+}
+
+.reference-brick,
+.zoom-brick{
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border-radius: 18px;
+  background: #f6f7fb;
+  box-shadow: 0 6px 18px rgba(0,0,0,.08);
+  position: relative;
+  overflow: hidden;
+}
+#rankSection{
+  width: 95vw;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+@media (max-width: 800px){
+  .reference-card{ flex: 1 1 100%; }
+}
+
+#rankSection{
+  margin-top: 4px;
+}
+
+.rank-labels{
+  width: min(95vw, 1100px);
+  display: flex;
+  justify-content: space-between;
+  margin: 0 auto 5px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #666;
+  padding: 0 12px;
+}
+
+.rank-label{
+  white-space: nowrap;
+}
+
+.rank-label-left{ color: #009E73; }
+.rank-label-right{ color: #D55E00; }
+
+
+.reference-brick img,
+.zoom-brick img{
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: inherit;
+}
 
 /* fixed bottom bar for Next button */
 #nextWrap{
@@ -42,8 +164,9 @@ body{
 #container{
   display:flex;
   flex-wrap: nowrap !important;   /* force one row */
-  gap:12px; overflow-x:auto; padding:8px 12px; max-width:95vw;
+  gap:12px; overflow-x:auto; padding:8px 12px; max-width:100%;
   align-items:flex-start;
+  flex: 1 1 auto;
 }
 
 
@@ -57,6 +180,11 @@ body{
   display: grid; place-items: center;
   cursor: grab;
   transition: transform .2s ease;
+}
+
+.brick.selected{
+  outline: 3px solid #2684FF;
+  outline-offset: -3px;
 }
 
 /* image fills the box once loaded */
