@@ -1,4 +1,5 @@
 # server_bo.py
+import argparse
 import signal
 import atexit
 from urllib.parse import urlparse
@@ -18,7 +19,7 @@ import multiprocessing
 
 import pytorch_lightning as pl
 import torch
-from fastapi import FastAPI
+from fastapi import FastAPI, Body
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -48,6 +49,7 @@ from search_benchmark.acq_prior import (
 )
 from helper.sampler import qmc_simplex_generator, get_mcmc_from_cache
 from async_multi_gpu_pool import MultiGPUInferPool
+from serialize import export_engine_state, apply_engine_state, save_engine_state, load_engine_state
 
 CONFIG_FILE = Path(__file__).parent.resolve() / "config.yml"
 
@@ -61,6 +63,28 @@ SLOTS_DIR.mkdir(parents=True, exist_ok=True)
 WORKING_DIR = OUTPUT_DIR / "work"
 WORKING_DIR.mkdir(parents=True, exist_ok=True)
 
+STATE_PATH_OVERRIDE: Path | None = None
+STATE_SAVE_PATH_OVERRIDE: Path | None = None
+
+_env_state_override = os.environ.get("ENGINE_STATE_PATH_OVERRIDE")
+if _env_state_override:
+    try:
+        STATE_PATH_OVERRIDE = Path(_env_state_override)
+        print(f"[env] Using engine state path override: {STATE_PATH_OVERRIDE}")
+    except Exception as exc:
+        print(f"[env] Failed to apply ENGINE_STATE_PATH_OVERRIDE: {exc}")
+
+_env_state_save_override = os.environ.get("ENGINE_STATE_SAVE_PATH_OVERRIDE")
+if _env_state_save_override:
+    try:
+        STATE_SAVE_PATH_OVERRIDE = Path(
+            _env_state_save_override)
+        print(
+            f"[env] Using engine save state path override: {STATE_SAVE_PATH_OVERRIDE}")
+    except Exception as exc:
+        print(
+            f"[env] Failed to apply ENGINE_STATE_SAVE_PATH_OVERRIDE: {exc}")
+
 app = FastAPI()
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -70,15 +94,21 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 @app.on_event("startup")
 async def _init_engine_once():
-    global engine
+    global engine, STATE_PATH_OVERRIDE, STATE_SAVE_PATH_OVERRIDE
     if engine is None:
-        engine = Engine(CONFIG_FILE, OUTPUT_DIR)
+        engine = Engine(
+            CONFIG_FILE,
+            OUTPUT_DIR,
+            state_path=STATE_PATH_OVERRIDE,
+            save_state_path=STATE_SAVE_PATH_OVERRIDE,
+        )
 
 
 @app.on_event("shutdown")
 async def _shutdown_engine_pool():
-    if engine and engine.gpu_pool:
-        engine.gpu_pool.shutdown()
+    if engine:
+        engine.save_state(reason="app-shutdown")
+    _shutdown_gpu_pool(save_state=False)
 
 
 def _make_rank_png_bytes(step: int, i: int, name: str) -> bytes:
@@ -119,9 +149,19 @@ class Engine:
     are written into OUTPUT_DIR so the frontend can load them.
     """
 
-    def __init__(self, config_path: Path, outputs_dir: Path) -> None:
+    def __init__(self, config_path: Path, outputs_dir: Path, *, state_path: Path | None = None,
+                 save_state_path: Path | None = None) -> None:
         self.outputs_dir = outputs_dir
         print(f"Outputs dir: {self.outputs_dir}")
+
+        self.config_path = Path(config_path).resolve()
+        self.config_snapshot: dict | None = None
+        self.state_path: Path | None = None
+        self.save_state_path: Path | None = None
+        self.autosave_enabled = True
+        self.autoload_state = True
+        self.state_loaded = False
+
         self.step: int = 0
         self._events = asyncio.Queue()
 
@@ -130,9 +170,30 @@ class Engine:
         self.worker_state_template: dict | None = None
         self._pool_warmed = False
 
+        self._reset_runtime_state()
+
         # Read config_path (yml)
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f)
+        with open(self.config_path, 'r') as f:
+            config = yaml.safe_load(f) or {}
+        if not isinstance(config, dict):
+            raise ValueError("Config file must be a mapping.")
+        self.config_snapshot = copy.deepcopy(config)
+
+        self.autosave_enabled = bool(config.get('autosave_enabled', True))
+        self.autoload_state = bool(config.get('autoload_state', True))
+
+        load_path = state_path
+        if load_path:
+            self.state_path = Path(load_path)
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            print(f"Engine state path: {self.state_path}")
+
+        save_path = save_state_path
+        if save_path:
+            self.save_state_path = Path(save_path)
+            self.save_state_path.parent.mkdir(parents=True, exist_ok=True)
+            print(f"Engine save state path: {self.save_state_path}")
+
         self.num_observations = config.get('num_observations', 10)
         self.init_dir = config.get('init_dir', None)
         self.seed = config.get('seed', 0)
@@ -283,6 +344,21 @@ class Engine:
             infer_height=self.infer_height,
             image_path=image_path)[0]
 
+    def _reset_runtime_state(self) -> None:
+        self.x_record = {}
+        self.x_observations = None
+        self.train_X = None
+        self.Y = None
+        self.path = []
+        self.path_train_X = None
+        self.path_Y = None
+        self.num_warmup = 0
+        self.MC_SAMPLES = 0
+        self.I = []
+        self.last_past_indices = []
+        self.ranking_history: list[dict] = []
+        self.last_round_context: dict | None = None
+
     def _make_worker_state_template(self) -> dict:
         return {
             "gt_image_path": self.gt_image_path,
@@ -296,6 +372,59 @@ class Engine:
             "control_img_path": self.control_img_path,
             "weight_idx": 1,
         }
+
+    def save_state(self, reason: str | None = None, path: Path | str | None = None, *, force: bool = False) -> Path | None:
+        target = path or self.save_state_path
+        if target is None:
+            print("No save-state path configured; skipping save.")
+            return None
+        target = Path(target)
+        if not force and not self.autosave_enabled and self.save_state_path and target == self.save_state_path:
+            print("Autosave disabled; skipping save.")
+            return None
+        try:
+            saved_path = save_engine_state(self, target, reason=reason)
+            print(
+                f"Saved engine state to {saved_path} ({reason or 'unspecified'})")
+            return saved_path
+        except Exception as exc:
+            print(f"Failed to save engine state to {target}: {exc}")
+            return None
+
+    def load_state(self, path: Path | str | None = None, *, reset: bool = False, force: bool = False) -> bool:
+        target = path or self.state_path
+        if target is None:
+            print("No state path configured; skipping load.")
+            return False
+        target = Path(target)
+        if not target.exists():
+            print(f"State file {target} does not exist.")
+            return False
+        if reset:
+            self._reset_runtime_state()
+        if not force and not self.autoload_state and target == self.state_path:
+            print("Autoload disabled; skipping load.")
+            return False
+        try:
+            payload = load_engine_state(target)
+            saved_meta = payload.get("metadata", {}) if isinstance(
+                payload, dict) else {}
+            saved_config = saved_meta.get("config_path")
+            if saved_config:
+                try:
+                    saved_path = Path(saved_config).resolve()
+                    if saved_path != self.config_path:
+                        print(
+                            f"Warning: loading state from {saved_path} while current config is {self.config_path}"
+                        )
+                except Exception:
+                    pass
+            apply_engine_state(self, payload, torch.device(device))
+            print(f"Loaded engine state from {target}")
+            return True
+        except Exception as exc:
+            print(f"Failed to load engine state from {target}: {exc}")
+            return False
 
     def _build_worker_payload(self, x_vector: np.ndarray) -> dict:
         state = copy.deepcopy(self.worker_state_template or {})
@@ -384,6 +513,45 @@ class Engine:
             new_y[i] = float(np.asarray(y).flatten()[0])
             await self._finalize_slot(i, idx, data, x_vec, round_id)
 
+    async def recall_last_round(self, *, emit_events: bool = False) -> bool:
+        ctx = self.last_round_context or {}
+        if not ctx:
+            print("No last round context available to recall.")
+            return False
+
+        new_x_payload = ctx.get("new_x")
+        new_I = ctx.get("new_I")
+        round_id = ctx.get("round")
+        if new_x_payload is None or new_I is None or round_id is None:
+            print("Incomplete round context; cannot recall generation.")
+            return False
+
+        new_x_tensor = torch.tensor(new_x_payload, dtype=torch.double).to(device)
+        new_I_list = [int(i) for i in new_I]
+        n = int(ctx.get("n", new_x_tensor.shape[0]))
+
+        regen_scores = ctx.get("new_y")
+        if isinstance(regen_scores, list) and len(regen_scores) == new_x_tensor.shape[0]:
+            new_y = [float(v) for v in regen_scores]
+        else:
+            new_y = [0.0 for _ in range(new_x_tensor.shape[0])]
+
+        if emit_events:
+            await self._events.put(("begin", {"round": round_id, "n": n}))
+
+        if self.gpu_pool:
+            await self._generate_with_pool(new_x_tensor, new_I_list, new_y, round_id)
+        else:
+            await self._generate_in_process(new_x_tensor, new_I_list, new_y, round_id)
+
+        if emit_events:
+            await self._events.put(("done", {"round": round_id}))
+
+        if self.last_round_context is not None:
+            self.last_round_context["new_y"] = [float(val) for val in new_y]
+
+        return True
+
     def get_gt_image_url(self) -> str | None:
         if not self.gt_image_path:
             return None
@@ -412,25 +580,42 @@ class Engine:
 
     def start(self) -> None:
         self.step = 0
-        # init_images = glob.glob(os.path.join(self.outputs_dir, 'init*.png'))
-        # if(len(init_images) < self.num_observations):
-        #     Print('Waiting for initiation to finish...')
+        self.last_selected_basename = None
+        self._reset_runtime_state()
+
+        restored = False
+        if self.autoload_state:
+            restored = self.load_state()
+
+        # Initialize mcmc cache regardless of restore state
+        get_mcmc_from_cache()
+
+        self.clear_outputs()
+        
+        if restored:
+            print(f"Restored engine state from {self.state_path}")
+            self._warmup_gpu_pool()
+            if self.last_round_context:
+                try:
+                    asyncio.run(self.recall_last_round())
+                except Exception as exc:
+                    print(f"Failed to recall last round during start: {exc}")
+            else:
+                print("No last round context to recall; outputs remain unchanged.")
+            return
 
         print('Starting with initial images...')
-        self.clear_outputs()
         if self.init_dir is not None:
-            # Simple copy example: copy init*.png from sibling repo into outputs
             src_dir = Path(self.init_dir)
-            # Path('/scratch/ondemand29/chenxil/code/mood-board/search_benchmark/pair_experiments_0704/_s00/')
         else:
             src_dir = WORKING_DIR
 
-        def f_init(x): return obj_sim(self.gt_image_path, self.component_weights, x, weight_idx=1,
-                                      infer_image_func=self.infer_img_func,
-                                      output_dir=src_dir, to_vis=True, is_init=True, control_img=self.control_img)
+        def f_init(x):
+            return obj_sim(self.gt_image_path, self.component_weights, x, weight_idx=1,
+                           infer_image_func=self.infer_img_func,
+                           output_dir=src_dir, to_vis=True, is_init=True, control_img=self.control_img)
+
         self.f_init = f_init
-        # x_observations, x_record = prepare_init_obs(self.num_observations, len(
-        #     self.component_weights), self.x_range, self.f_init, seed=self.seed)
 
         if src_dir.exists():
             for p in sorted(src_dir.glob("init*.png")):
@@ -441,19 +626,15 @@ class Engine:
         self.init_dir = src_dir
         os.makedirs(self.init_dir, exist_ok=True)
 
-        # Initialize mcmc cache
-        get_mcmc_from_cache()
-
-        # self.lora2canon_dim, self.dim2loras, self.dim2dims = self.build_tree()
         self.x_observations, x_record = prepare_init_obs_simplex(self.num_observations, len(
             self.component_weights), self.f_init, seed=self.seed, sparse_threshold=0.1, sampler=sample_dirichlet_simplex)
         self.x_record = x_record
-        
-        # Warmup GPU pool
+
         print("Warming up GPU pool...")
         self._warmup_gpu_pool()
-        
+
         print("Engine started.")
+        self.save_state(reason="start")
 
     def build_tree(self):
         # Build LoRA tree
@@ -671,6 +852,26 @@ class Engine:
         if round_id is None:
             round_id = int(asyncio.get_running_loop().time() * 1000)
 
+        self.ranking_history.append({
+            "step": int(self.step),
+            "round": int(round_id),
+            "ranking": list(ranking_basenames),
+            "indices": [int(x) for x in ranked_indices],
+            "selected": self.last_selected_basename,
+            "saved_at": time.time(),
+        })
+
+        ctx_new_x = new_x.detach().cpu().tolist()
+        self.last_round_context = {
+            "step": int(self.step),
+            "round": int(round_id),
+            "n": int(n),
+            "new_x": ctx_new_x,
+            "new_I": [int(i) for i in new_I],
+            "ranking": list(ranking_basenames),
+            "timestamp": time.time(),
+        }
+
         # Tell clients a new round started
         await self._events.put(("begin", {"round": round_id, "n": n}))
 
@@ -680,15 +881,19 @@ class Engine:
             await self._generate_with_pool(new_x, new_I, new_y, round_id)
         else:
             await self._generate_in_process(new_x, new_I, new_y, round_id)
+        new_y_results = list(new_y)
+        if self.last_round_context is not None:
+            self.last_round_context["new_y"] = [float(val) for val in new_y_results]
 
-        new_y = new_y[1::]
+        feedback_values = new_y_results[1::]
         self.Y = torch.cat([self.Y, torch.from_numpy(
-            np.array(new_y).reshape(-1, 1)).double().to(device)], dim=0)
+            np.array(feedback_values).reshape(-1, 1)).double().to(device)], dim=0)
 
         # Tell clients the round finished
         await self._events.put(("done", {"round": round_id}))  # <-- await
 
         self.step += 1
+        self.save_state(reason=f"step-{self.step}")
 
 
 engine: Engine | None = None
@@ -716,12 +921,81 @@ def health() -> dict:
     return {"ok": True}
 
 
+@app.post("/api/state/save")
+def api_save_state(payload: dict | None = Body(default=None)) -> JSONResponse:
+    eng = _require_engine()
+    data = payload or {}
+    path = data.get("path")
+    reason = data.get("reason") or "api"
+    force = bool(data.get("force", False))
+    saved_path = eng.save_state(reason=reason, path=path, force=force)
+    if not saved_path:
+        return JSONResponse({
+            "saved": False,
+            "path": str(path) if path else None,
+        }, status_code=400)
+    return JSONResponse({"saved": True, "path": str(saved_path)})
+
+
+@app.post("/api/state/load")
+async def api_load_state(payload: dict | None = Body(default=None)) -> JSONResponse:
+    eng = _require_engine()
+    data = payload or {}
+    path = data.get("path")
+    force = bool(data.get("force", False))
+    reset = data.get("reset")
+    if reset is None:
+        reset = True
+    warmup = data.get("warmup")
+    if warmup is None:
+        warmup = True
+    loaded = eng.load_state(path=path, reset=bool(reset), force=force)
+    if loaded and warmup and eng.gpu_pool:
+        eng._warmup_gpu_pool()
+
+    recalled = False
+    if loaded and data.get("recall"):
+        emit_events = bool(data.get("emit_events", False))
+        if eng.gpu_pool and not eng._pool_warmed:
+            eng._warmup_gpu_pool()
+        recalled = await eng.recall_last_round(emit_events=emit_events)
+
+    status = 200 if loaded else 404
+    return JSONResponse({
+        "loaded": bool(loaded),
+        "path": str(path or eng.state_path),
+        "recalled": bool(recalled),
+    }, status_code=status)
+
+
+@app.post("/api/state/recall")
+async def api_recall_state(payload: dict | None = Body(default=None)) -> JSONResponse:
+    eng = _require_engine()
+    data = payload or {}
+    emit_events = bool(data.get("emit_events", False))
+    if eng.gpu_pool and not eng._pool_warmed:
+        eng._warmup_gpu_pool()
+    recalled = await eng.recall_last_round(emit_events=emit_events)
+    status = 200 if recalled else 404
+    return JSONResponse({
+        "recalled": bool(recalled),
+    }, status_code=status)
+
+
 def _list_image_urls() -> List[str]:
     exts = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
-    images = [p for p in OUTPUT_DIR.iterdir() if p.suffix.lower()
-              in exts and p.is_file()]
+    slots = [p for p in SLOTS_DIR.iterdir()
+             if p.suffix.lower() in exts and p.is_file()]
+    outputs = [p for p in OUTPUT_DIR.iterdir()
+               if p.suffix.lower() in exts and p.is_file()]
+
+    # When restoring state, slot images represent the active round; fall back to
+    # the historical outputs directory only if no slot images exist.
+    images = slots or outputs
     images.sort()
-    return [f"/outputs/{p.name}" for p in images]
+
+    base = "/slots" if images is slots else "/outputs"
+    return [f"{base}/{p.name}" for p in images]
 
 
 @app.get("/api/images")
@@ -827,12 +1101,21 @@ async def events():
 # --- Robust GPU pool shutdown handlers (atexit + signals) ---
 
 
-def _shutdown_gpu_pool(from_signal=False):
+def _autosave_engine_state(reason: str) -> None:
+    if engine is None:
+        return
+    engine.save_state(reason=reason)
+
+
+def _shutdown_gpu_pool(from_signal: bool = False, *, save_state: bool = True):
     """Safely shutdown the MultiGPUInferPool if initialized.
 
     Args:
         from_signal: whether invoked from a signal handler (affects log message).
     """
+    if save_state:
+        reason = "signal" if from_signal else "shutdown"
+        _autosave_engine_state(reason)
     if engine is None:
         return
     pool = engine.gpu_pool
@@ -865,5 +1148,25 @@ def _register_shutdown_handlers():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Interactive ranking server")
+    parser.add_argument("--state-path", dest="state_path", type=str,
+                        help="Override path used to load engine state")
+    parser.add_argument("--save-state-path", dest="save_state_path", type=str,
+                        help="Override path used when saving engine state")
+    args = parser.parse_args()
+
+    if args.state_path:
+        STATE_PATH_OVERRIDE = Path(args.state_path).expanduser()
+        os.environ["ENGINE_STATE_PATH_OVERRIDE"] = str(STATE_PATH_OVERRIDE)
+        print(f"[cli] Using engine state path override: {STATE_PATH_OVERRIDE}")
+
+    if args.save_state_path:
+        STATE_SAVE_PATH_OVERRIDE = Path(args.save_state_path).expanduser()
+        os.environ["ENGINE_STATE_SAVE_PATH_OVERRIDE"] = str(
+            STATE_SAVE_PATH_OVERRIDE)
+        print(
+            f"[cli] Using engine save state path override: {STATE_SAVE_PATH_OVERRIDE}")
+
     _register_shutdown_handlers()
-    uvicorn.run("server_bo:app", host="127.0.0.1", port=8000, reload=True)
+    # uvicorn.run("server_bo:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("server_bo:app", host="0.0.0.0", port=8000, reload=True)
