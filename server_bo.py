@@ -946,11 +946,8 @@ async def api_load_state(payload: dict | None = Body(default=None)) -> JSONRespo
     reset = data.get("reset")
     if reset is None:
         reset = True
-    warmup = data.get("warmup")
-    if warmup is None:
-        warmup = True
     loaded = eng.load_state(path=path, reset=bool(reset), force=force)
-    if loaded and warmup and eng.gpu_pool:
+    if loaded and eng.gpu_pool:
         eng._warmup_gpu_pool()
 
     recalled = False
