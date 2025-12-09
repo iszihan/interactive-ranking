@@ -175,6 +175,12 @@ def apply_engine_state(engine: "Engine", payload: Dict[str, Any], device: torch.
                 int(i) for i in normalized_ctx.get("new_I", [])]
         if "round" in normalized_ctx:
             normalized_ctx["round"] = int(normalized_ctx["round"])
+        if "iteration" in normalized_ctx and normalized_ctx["iteration"] is not None:
+            try:
+                normalized_ctx["iteration"] = int(
+                    normalized_ctx["iteration"])
+            except (TypeError, ValueError):
+                normalized_ctx.pop("iteration", None)
         engine.last_round_context = normalized_ctx
     else:
         engine.last_round_context = None

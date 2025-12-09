@@ -473,13 +473,17 @@ class Engine:
 
         self._pool_warmed = True
 
-    async def _finalize_slot(self, slot_idx: int, idx: int, data: bytes, x_vector: np.ndarray, round_id: int):
+    async def _finalize_slot(self, slot_idx: int, idx: int, data: bytes, x_vector: np.ndarray, round_id: int, iteration: int):
         out_path = SLOTS_DIR / f"slot-{slot_idx}.png"
         await asyncio.to_thread(out_path.write_bytes, data)
-        await self._events.put(("slot", {"round": round_id, "slot": slot_idx}))
+        await self._events.put(("slot", {
+            "round": round_id,
+            "slot": slot_idx,
+            "iteration": int(iteration),
+        }))
         self.x_record[out_path.name] = (x_vector, int(idx))
 
-    async def _generate_with_pool(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int):
+    async def _generate_with_pool(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int):
         pending: dict[int, tuple[int, int]] = {}
         for i in range(new_x.shape[0]):
             x_trial = new_x[i]
@@ -501,9 +505,9 @@ class Engine:
                 data = data.tobytes()
             x_vec = np.array(result["x"], dtype=np.float64)
             new_y[slot_idx] = float(result["sim_val"])
-            await self._finalize_slot(slot_idx, idx, data, x_vec, round_id)
+            await self._finalize_slot(slot_idx, idx, data, x_vec, round_id, iteration)
 
-    async def _generate_in_process(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int):
+    async def _generate_in_process(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int):
         for i in range(new_x.shape[0]):
             x_trial = new_x[i]
             if isinstance(x_trial, torch.Tensor):
@@ -511,7 +515,7 @@ class Engine:
             idx = new_I[i]
             data, x_vec, y = await asyncio.to_thread(_make_generation, self, x_trial)
             new_y[i] = float(np.asarray(y).flatten()[0])
-            await self._finalize_slot(i, idx, data, x_vec, round_id)
+            await self._finalize_slot(i, idx, data, x_vec, round_id, iteration)
 
     async def recall_last_round(self, *, emit_events: bool = False) -> bool:
         ctx = self.last_round_context or {}
@@ -530,6 +534,16 @@ class Engine:
         new_I_list = [int(i) for i in new_I]
         n = int(ctx.get("n", new_x_tensor.shape[0]))
 
+        iteration = ctx.get("iteration")
+        if iteration is None:
+            base_step = ctx.get("step")
+            if base_step is None:
+                iteration = int(self.step) if self.step else 0
+            else:
+                iteration = int(base_step) + 1
+        else:
+            iteration = int(iteration)
+
         regen_scores = ctx.get("new_y")
         if isinstance(regen_scores, list) and len(regen_scores) == new_x_tensor.shape[0]:
             new_y = [float(v) for v in regen_scores]
@@ -537,15 +551,19 @@ class Engine:
             new_y = [0.0 for _ in range(new_x_tensor.shape[0])]
 
         if emit_events:
-            await self._events.put(("begin", {"round": round_id, "n": n}))
+            await self._events.put(("begin", {
+                "round": round_id,
+                "n": n,
+                "iteration": iteration,
+            }))
 
         if self.gpu_pool:
-            await self._generate_with_pool(new_x_tensor, new_I_list, new_y, round_id)
+            await self._generate_with_pool(new_x_tensor, new_I_list, new_y, round_id, iteration)
         else:
-            await self._generate_in_process(new_x_tensor, new_I_list, new_y, round_id)
+            await self._generate_in_process(new_x_tensor, new_I_list, new_y, round_id, iteration)
 
         if emit_events:
-            await self._events.put(("done", {"round": round_id}))
+            await self._events.put(("done", {"round": round_id, "iteration": iteration}))
 
         if self.last_round_context is not None:
             self.last_round_context["new_y"] = [float(val) for val in new_y]
@@ -851,6 +869,7 @@ class Engine:
 
         if round_id is None:
             round_id = int(asyncio.get_running_loop().time() * 1000)
+        iteration = int(self.step) + 1
 
         self.ranking_history.append({
             "step": int(self.step),
@@ -870,17 +889,22 @@ class Engine:
             "new_I": [int(i) for i in new_I],
             "ranking": list(ranking_basenames),
             "timestamp": time.time(),
+            "iteration": int(iteration),
         }
 
         # Tell clients a new round started
-        await self._events.put(("begin", {"round": round_id, "n": n}))
+        await self._events.put(("begin", {
+            "round": round_id,
+            "n": n,
+            "iteration": int(iteration),
+        }))
 
         # Iterate and generate each slot given new_x
         new_y = [0 for _ in range(new_x.shape[0])]
         if self.gpu_pool:
-            await self._generate_with_pool(new_x, new_I, new_y, round_id)
+            await self._generate_with_pool(new_x, new_I, new_y, round_id, iteration)
         else:
-            await self._generate_in_process(new_x, new_I, new_y, round_id)
+            await self._generate_in_process(new_x, new_I, new_y, round_id, iteration)
         new_y_results = list(new_y)
         if self.last_round_context is not None:
             self.last_round_context["new_y"] = [float(val) for val in new_y_results]
@@ -890,7 +914,10 @@ class Engine:
             np.array(feedback_values).reshape(-1, 1)).double().to(device)], dim=0)
 
         # Tell clients the round finished
-        await self._events.put(("done", {"round": round_id}))  # <-- await
+        await self._events.put(("done", {
+            "round": round_id,
+            "iteration": int(iteration),
+        }))  # <-- await
 
         self.step += 1
         self.save_state(reason=f"step-{self.step}")
@@ -1010,6 +1037,7 @@ def start() -> JSONResponse:
     eng = _require_engine()
     eng.start()
     gt_url = eng.get_gt_image_url()
+    iteration = int(getattr(eng, "step", 0))
 
     MIN_COUNT = 1          # how many images make a “batch”
     WAIT_TIMEOUT = 120.0
@@ -1018,11 +1046,20 @@ def start() -> JSONResponse:
         images = _list_image_urls()
         if len(images) >= MIN_COUNT:
             print(f"Returning {len(images)} images from {OUTPUT_DIR}")
-            return JSONResponse({"images": images, "gt_image": gt_url}, headers={"Cache-Control": "no-store"})
+            return JSONResponse({
+                "images": images,
+                "gt_image": gt_url,
+                "iteration": iteration,
+            }, headers={"Cache-Control": "no-store"})
         time.sleep(0.2)  # small sleep to avoid busy-wait
 
     # timed out (engine failed or took too long)
-    return JSONResponse({"status": "pending", "images": [], "gt_image": gt_url}, status_code=202)
+    return JSONResponse({
+        "status": "pending",
+        "images": [],
+        "gt_image": gt_url,
+        "iteration": iteration,
+    }, status_code=202)
 
 
 class NextRequest(BaseModel):
