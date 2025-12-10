@@ -21,6 +21,52 @@ let sliderState = [];
 let sliderThumbnails = [];
 let historyEntries = [];
 
+function canonicalizeImage(src) {
+  if (typeof src !== "string" || !src) return null;
+  return src.split("?")[0];
+}
+
+function formatHistoryTimestamp(ts) {
+  if (!Number.isFinite(ts)) return undefined;
+  try {
+    return new Date(ts * 1000).toLocaleTimeString();
+  } catch (err) {
+    return undefined;
+  }
+}
+
+function resolveHistoryLabel(entry, fallback) {
+  if (!entry) return fallback;
+  if (entry.label) return entry.label;
+  if (typeof entry.timestamp === "number") {
+    const formatted = formatHistoryTimestamp(entry.timestamp);
+    if (formatted) return formatted;
+  }
+  return fallback;
+}
+
+function buildHistoryEntry(raw) {
+  if (!raw || !Array.isArray(raw.x)) return null;
+  const vector = raw.x.map((value) => Number(value));
+  if (!vector.length || vector.some((v) => Number.isNaN(v))) return null;
+  const timestamp = typeof raw.timestamp === "number" ? raw.timestamp : Date.now() / 1000;
+  return {
+    x: vector,
+    similarity: typeof raw.similarity === "number" ? raw.similarity : undefined,
+    image: canonicalizeImage(raw.image),
+    timestamp,
+    label: formatHistoryTimestamp(timestamp),
+  };
+}
+
+function hydrateHistoryFromPayload(payload) {
+  const entries = Array.isArray(payload)
+    ? payload.map((item) => buildHistoryEntry(item)).filter(Boolean)
+    : [];
+  historyEntries = entries.slice(0, 10);
+  renderHistory();
+}
+
 if (iterationIndicator) iterationIndicator.classList.add("hidden");
 if (referenceSection) referenceSection.classList.add("hidden");
 if (sliderPanel) sliderPanel.classList.add("hidden");
@@ -206,7 +252,7 @@ function renderHistory() {
 
     const title = document.createElement("span");
     title.className = "history-entry-title";
-    title.textContent = entry.label || `Attempt ${historyEntries.length - index}`;
+    title.textContent = resolveHistoryLabel(entry, `Attempt ${historyEntries.length - index}`);
 
     const vector = document.createElement("span");
     vector.className = "history-entry-vector";
@@ -218,8 +264,7 @@ function renderHistory() {
     button.addEventListener("click", () => {
       sliderState = entry.x.slice();
       updateSliderInputsFromState();
-      updatePreviewImage(entry.image || null);
-      statusEl.textContent = "Loaded sliders from history.";
+      renderFromSliders({ source: "history" });
     });
 
     historyList.appendChild(button);
@@ -229,14 +274,14 @@ function renderHistory() {
 }
 
 function addHistoryEntry(payload) {
-  const canonicalImage = payload && typeof payload.image === "string"
-    ? payload.image.split("?")[0]
-    : null;
-  const entry = {
-    x: payload && Array.isArray(payload.x) ? payload.x.slice() : sliderState.slice(),
+  const entryFromPayload = buildHistoryEntry(payload);
+  const timestamp = Date.now() / 1000;
+  const entry = entryFromPayload || {
+    x: sliderState.slice(),
     similarity: payload && typeof payload.similarity === "number" ? payload.similarity : undefined,
-    label: payload && payload.timestamp ? new Date(payload.timestamp * 1000).toLocaleTimeString() : undefined,
-    image: canonicalImage,
+    image: canonicalizeImage(payload && payload.image),
+    timestamp,
+    label: formatHistoryTimestamp(timestamp),
   };
   historyEntries = [entry, ...historyEntries].slice(0, 10);
   renderHistory();
@@ -258,10 +303,22 @@ async function startProcess() {
     updateReferenceImage(data.gt_image);
     buildSliderInterface(data.slider || {});
     updatePreviewImage(data.latest_image || null);
+    hydrateHistoryFromPayload(data.history);
+    if (historyEntries.length) {
+      sliderState = historyEntries[0].x.slice();
+      updateSliderInputsFromState();
+      if (!data.latest_image) {
+        updatePreviewImage(historyEntries[0].image || null);
+      }
+    }
 
     if (controls) controls.classList.add("hidden");
     if (sliderPanel && sliderLabels.length) sliderPanel.classList.remove("hidden");
-    statusEl.textContent = sliderLabels.length ? "Adjust each slider, then render." : "No sliders available.";
+    if (historyEntries.length) {
+      statusEl.textContent = "Restored previous sliders. Adjust and render when ready.";
+    } else {
+      statusEl.textContent = sliderLabels.length ? "Adjust each slider, then render." : "No sliders available.";
+    }
   } catch (err) {
     const msg = err && err.message ? err.message : err;
     statusEl.textContent = `Error: ${msg}`;
@@ -276,16 +333,22 @@ if (startBtn) {
   startBtn.addEventListener("click", startProcess);
 }
 
-async function renderFromSliders() {
+async function renderFromSliders(options = {}) {
   if (!Array.isArray(sliderState) || !sliderState.length) return;
+  const source = options && options.source ? String(options.source) : null;
+  const isHistoryRender = source === "history";
   try {
-    renderBtn.disabled = true;
-    statusEl.textContent = "Rendering…";
+    if (renderBtn) renderBtn.disabled = true;
+    statusEl.textContent = isHistoryRender ? "Re-rendering saved sliders…" : "Rendering…";
 
     const resp = await fetch("/api/slider/eval", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ vector: sliderState, normalize: true }),
+      body: JSON.stringify({
+        vector: sliderState,
+        normalize: true,
+        record_history: !isHistoryRender,
+      }),
     });
     const data = await resp.json();
     if (!resp.ok) {
@@ -298,13 +361,15 @@ async function renderFromSliders() {
     }
 
     updatePreviewImage(data.image || null);
-    addHistoryEntry(data);
-    statusEl.textContent = "Render complete.";
+    if (!isHistoryRender) {
+      addHistoryEntry(data);
+    }
+    statusEl.textContent = isHistoryRender ? "History render complete." : "Render complete.";
   } catch (err) {
     const msg = err && err.message ? err.message : err;
     statusEl.textContent = `Error: ${msg}`;
   } finally {
-    renderBtn.disabled = sliderState.length === 0;
+    if (renderBtn) renderBtn.disabled = sliderState.length === 0;
   }
 }
 

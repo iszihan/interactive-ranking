@@ -31,7 +31,7 @@ from helper.infer import infer
 from engine import (obj_sim, infer_image_img2img, infer_image)
 
 from async_multi_gpu_pool import MultiGPUInferPool
-from serialize import export_engine_state, apply_engine_state, save_engine_state, load_engine_state
+from serialize import save_slider_state, load_slider_state, apply_slider_engine_state
 
 CONFIG_FILE = Path(__file__).parent.resolve() / "config.yml"
 
@@ -71,6 +71,8 @@ app = FastAPI()
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+SLIDER_HISTORY_LIMIT = 20
+
 # helpers ------------------------------------------------------------
 
 
@@ -89,7 +91,7 @@ async def _init_engine_once():
 @app.on_event("shutdown")
 async def _shutdown_engine_pool():
     if engine:
-        engine.save_state(reason="app-shutdown")
+        _save_slider_checkpoint(engine, reason="app-shutdown")
     _shutdown_gpu_pool(save_state=False)
 
 
@@ -308,6 +310,7 @@ class Engine:
     def _reset_runtime_state(self) -> None:
         self.x_record = {}
         self.last_round_context: dict | None = None
+        self.slider_history: list[dict] = []
 
     def _make_worker_state_template(self) -> dict:
         return {
@@ -347,58 +350,36 @@ class Engine:
         self._example_cache[model_id] = None
         return None
 
-    def save_state(self, reason: str | None = None, path: Path | str | None = None, *, force: bool = False) -> Path | None:
-        target = path or self.save_state_path
-        if target is None:
-            print("No save-state path configured; skipping save.")
-            return None
-        target = Path(target)
-        if not force and not self.autosave_enabled and self.save_state_path and target == self.save_state_path:
-            print("Autosave disabled; skipping save.")
-            return None
-        try:
-            saved_path = save_engine_state(self, target, reason=reason)
-            print(
-                f"Saved engine state to {saved_path} ({reason or 'unspecified'})")
-            return saved_path
-        except Exception as exc:
-            print(f"Failed to save engine state to {target}: {exc}")
-            return None
+    def _record_slider_history(self, payload: dict) -> None:
+        if not payload:
+            return
+        x_vals = payload.get("x")
+        if not isinstance(x_vals, list):
+            return
+        entry = {
+            "x": [float(v) for v in x_vals],
+            "image": payload.get("image"),
+            "similarity": payload.get("similarity"),
+            "timestamp": float(payload.get("timestamp") or time.time()),
+        }
+        self.slider_history.insert(0, entry)
+        if len(self.slider_history) > SLIDER_HISTORY_LIMIT:
+            del self.slider_history[SLIDER_HISTORY_LIMIT:]
 
-    def load_state(self, path: Path | str | None = None, *, reset: bool = False, force: bool = False) -> bool:
-        target = path or self.state_path
-        if target is None:
-            print("No state path configured; skipping load.")
-            return False
-        target = Path(target)
-        if not target.exists():
-            print(f"State file {target} does not exist.")
-            return False
-        if reset:
-            self._reset_runtime_state()
-        if not force and not self.autoload_state and target == self.state_path:
-            print("Autoload disabled; skipping load.")
-            return False
-        try:
-            payload = load_engine_state(target)
-            saved_meta = payload.get("metadata", {}) if isinstance(
-                payload, dict) else {}
-            saved_config = saved_meta.get("config_path")
-            if saved_config:
-                try:
-                    saved_path = Path(saved_config).resolve()
-                    if saved_path != self.config_path:
-                        print(
-                            f"Warning: loading state from {saved_path} while current config is {self.config_path}"
-                        )
-                except Exception:
-                    pass
-            apply_engine_state(self, payload, torch.device(device))
-            print(f"Loaded engine state from {target}")
-            return True
-        except Exception as exc:
-            print(f"Failed to load engine state from {target}: {exc}")
-            return False
+    def get_slider_history_payload(self) -> list[dict]:
+        history_payload: list[dict] = []
+        for entry in self.slider_history:
+            x_vals = entry.get("x")
+            if not isinstance(x_vals, list):
+                continue
+            history_payload.append({
+                "x": [float(v) for v in x_vals],
+                "image": entry.get("image"),
+                "similarity": entry.get("similarity"),
+                "timestamp": entry.get("timestamp"),
+            })
+        return history_payload
+
 
     def _build_worker_payload(self, x_vector: np.ndarray) -> dict:
         state = copy.deepcopy(self.worker_state_template or {})
@@ -577,7 +558,7 @@ class Engine:
 
         restored = False
         if self.autoload_state:
-            restored = self.load_state()
+            restored = _load_slider_checkpoint(self)
 
         # Initialize mcmc cache regardless of restore state
         # get_mcmc_from_cache()
@@ -615,7 +596,7 @@ class Engine:
         self._warmup_gpu_pool()
 
         print("Engine started.")
-        self.save_state(reason="start")
+        _save_slider_checkpoint(self, reason="start")
 
     def get_slider_metadata(self) -> dict:
         labels = []
@@ -640,7 +621,8 @@ class Engine:
             "model_ids": model_ids,
         }
 
-    def evaluate_slider_vector(self, values: List[float]) -> dict:
+    def evaluate_slider_vector(self, values: List[float], *, record_history: bool = True,
+                               autosave: bool = True) -> dict:
         dim = len(self.component_weights)
         if dim == 0:
             raise ValueError("No components configured for slider evaluation.")
@@ -666,6 +648,10 @@ class Engine:
             "similarity": sim_scalar,
             "timestamp": time.time(),
         }
+        if record_history:
+            self._record_slider_history(payload)
+        if autosave:
+            _save_slider_checkpoint(self, reason="slider-eval")
         return payload
 
 
@@ -676,6 +662,59 @@ def _require_engine() -> Engine:
     if engine is None:
         raise RuntimeError("Engine is not initialized in this process.")
     return engine
+
+
+def _save_slider_checkpoint(eng: Engine, reason: str | None = None, path: Path | str | None = None,
+                            *, force: bool = False) -> Path | None:
+    target = path or eng.save_state_path
+    if target is None:
+        print("No save-state path configured; skipping save.")
+        return None
+    target = Path(target)
+    if not force and not eng.autosave_enabled and eng.save_state_path and target == eng.save_state_path:
+        print("Autosave disabled; skipping save.")
+        return None
+    try:
+        saved_path = save_slider_state(eng, target, reason=reason)
+        print(f"Saved engine state to {saved_path} ({reason or 'unspecified'})")
+        return saved_path
+    except Exception as exc:
+        print(f"Failed to save engine state to {target}: {exc}")
+        return None
+
+
+def _load_slider_checkpoint(eng: Engine, *, path: Path | str | None = None,
+                            reset: bool = False, force: bool = False) -> bool:
+    target = path or eng.state_path
+    if target is None:
+        print("No state path configured; skipping load.")
+        return False
+    target = Path(target)
+    if not target.exists():
+        print(f"State file {target} does not exist.")
+        return False
+    if reset:
+        eng._reset_runtime_state()
+    if not force and not eng.autoload_state and eng.state_path and target == eng.state_path:
+        print("Autoload disabled; skipping load.")
+        return False
+    try:
+        payload = load_slider_state(target)
+        saved_meta = payload.get("metadata", {}) if isinstance(payload, dict) else {}
+        saved_config = saved_meta.get("config_path")
+        if saved_config:
+            try:
+                saved_path = Path(saved_config).resolve()
+                if saved_path != eng.config_path:
+                    print(f"Warning: loading state from {saved_path} while current config is {eng.config_path}")
+            except Exception:
+                pass
+        apply_slider_engine_state(eng, payload, torch.device(device))
+        print(f"Loaded engine state from {target}")
+        return True
+    except Exception as exc:
+        print(f"Failed to load engine state from {target}: {exc}")
+        return False
 
 
 app.mount(
@@ -705,7 +744,7 @@ def api_save_state(payload: dict | None = Body(default=None)) -> JSONResponse:
     path = data.get("path")
     reason = data.get("reason") or "api"
     force = bool(data.get("force", False))
-    saved_path = eng.save_state(reason=reason, path=path, force=force)
+    saved_path = _save_slider_checkpoint(eng, reason=reason, path=path, force=force)
     if not saved_path:
         return JSONResponse({
             "saved": False,
@@ -723,7 +762,7 @@ async def api_load_state(payload: dict | None = Body(default=None)) -> JSONRespo
     reset = data.get("reset")
     if reset is None:
         reset = True
-    loaded = eng.load_state(path=path, reset=bool(reset), force=force)
+    loaded = _load_slider_checkpoint(eng, path=path, reset=bool(reset), force=force)
     if loaded and eng.gpu_pool:
         eng._warmup_gpu_pool()
 
@@ -822,24 +861,60 @@ def start() -> JSONResponse:
     gt_url = eng.get_gt_image_url()
     iteration = int(getattr(eng, "step", 0))
     slider_meta = eng.get_slider_metadata()
-    initial_render_url = None
-    zero_vector = list(slider_meta.get("default") or [])
-    if slider_meta.get("dimension", 0) > 0 and zero_vector:
-        try:
-            zero_result = eng.evaluate_slider_vector(zero_vector)
-            initial_render_url = zero_result.get("image")
-            slider_meta["default"] = zero_result.get("x", zero_vector)
-        except Exception as exc:
-            print(f"[start] Failed zero-vector render: {exc}")
+    history_payload = eng.get_slider_history_payload()
+    latest_image = None
 
-    images = _list_image_urls()
-    latest_image = initial_render_url or (images[-1] if images else None)
+    if history_payload:
+        latest_entry = history_payload[0]
+        restored_vector = latest_entry.get("x")
+        if isinstance(restored_vector, list) and restored_vector:
+            sanitized_vector = [float(v) for v in restored_vector]
+            slider_meta["default"] = sanitized_vector
+            try:
+                restored = eng.evaluate_slider_vector(
+                    sanitized_vector,
+                    record_history=False,
+                    autosave=False,
+                )
+                latest_image = restored.get("image")
+                refreshed_timestamp = restored.get("timestamp")
+                refreshed_similarity = restored.get("similarity")
+                if latest_image:
+                    latest_entry["image"] = latest_image
+                if refreshed_timestamp is not None:
+                    latest_entry["timestamp"] = refreshed_timestamp
+                if refreshed_similarity is not None:
+                    latest_entry["similarity"] = refreshed_similarity
+                if eng.slider_history:
+                    eng.slider_history[0]["image"] = latest_entry.get("image")
+                    if refreshed_timestamp is not None:
+                        eng.slider_history[0]["timestamp"] = refreshed_timestamp
+                    if refreshed_similarity is not None:
+                        eng.slider_history[0]["similarity"] = refreshed_similarity
+            except Exception as exc:
+                print(f"[start] Failed to restore latest slider render: {exc}")
+
+    if latest_image is None:
+        zero_vector = list(slider_meta.get("default") or [])
+        if slider_meta.get("dimension", 0) > 0 and zero_vector:
+            try:
+                zero_result = eng.evaluate_slider_vector(zero_vector)
+                latest_image = zero_result.get("image")
+                slider_meta["default"] = zero_result.get("x", zero_vector)
+                history_payload = eng.get_slider_history_payload()
+            except Exception as exc:
+                print(f"[start] Failed zero-vector render: {exc}")
+
+    if latest_image is None:
+        images = _list_image_urls()
+        latest_image = images[-1] if images else None
 
     return JSONResponse({
         "gt_image": gt_url,
         "iteration": iteration,
         "slider": slider_meta,
         "latest_image": latest_image,
+        "history": history_payload,
     }, headers={"Cache-Control": "no-store"})
 
 
@@ -850,6 +925,7 @@ class NextRequest(BaseModel):
 
 class SliderEvalRequest(BaseModel):
     vector: List[float]
+    record_history: bool = True
 
 
 # helper: get "foo.png" from any string, ignore blob:
@@ -878,6 +954,7 @@ async def api_slider_eval(req: SliderEvalRequest) -> JSONResponse:
         result = await asyncio.to_thread(
             eng.evaluate_slider_vector,
             req.vector,
+            record_history=req.record_history,
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -885,6 +962,13 @@ async def api_slider_eval(req: SliderEvalRequest) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
     return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/slider/history")
+def api_slider_history() -> JSONResponse:
+    eng = _require_engine()
+    history = eng.get_slider_history_payload()
+    return JSONResponse({"history": history}, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/events")
@@ -910,7 +994,7 @@ async def events():
 def _autosave_engine_state(reason: str) -> None:
     if engine is None:
         return
-    engine.save_state(reason=reason)
+    _save_slider_checkpoint(engine, reason=reason)
 
 
 def _shutdown_gpu_pool(from_signal: bool = False, *, save_state: bool = True):
