@@ -18,6 +18,7 @@ let currentIteration = null;
 let sliderRange = [0, 1];
 let sliderLabels = [];
 let sliderState = [];
+let sliderThumbnails = [];
 let historyEntries = [];
 
 if (iterationIndicator) iterationIndicator.classList.add("hidden");
@@ -85,16 +86,52 @@ function handleSliderChange(idx, rawValue) {
   sliderState[idx] = Number(rawValue);
 }
 
-function createSliderRow(label, value, index) {
+function createSliderRow(label, value, index, thumbnailUrl) {
   const row = document.createElement("div");
   row.className = "slider-row";
+
+  const body = document.createElement("div");
+  body.className = "slider-row-body";
+  const fallbackLabel = label || `Slider ${index + 1}`;
+
+  if (thumbnailUrl) {
+    const thumbStack = document.createElement("div");
+    thumbStack.className = "slider-thumb-stack";
+
+    const thumbWrap = document.createElement("div");
+    thumbWrap.className = "slider-thumb";
+    const img = document.createElement("img");
+    img.loading = "lazy";
+    img.decoding = "async";
+    const canonical = thumbnailUrl.split("?")[0];
+    const cacheKey = Date.now();
+    img.src = `${canonical}?thumb=${cacheKey}`;
+    img.alt = `${fallbackLabel} reference`;
+    thumbWrap.appendChild(img);
+    thumbStack.appendChild(thumbWrap);
+
+    const preview = document.createElement("div");
+    preview.className = "slider-thumb-preview";
+    const previewImg = document.createElement("img");
+    previewImg.loading = "lazy";
+    previewImg.decoding = "async";
+    previewImg.src = `${canonical}?preview=${cacheKey}`;
+    previewImg.alt = `${fallbackLabel} large preview`;
+    preview.appendChild(previewImg);
+    thumbStack.appendChild(preview);
+
+    body.appendChild(thumbStack);
+  }
+
+  const detail = document.createElement("div");
+  detail.className = "slider-row-detail";
 
   const head = document.createElement("div");
   head.className = "slider-row-head";
 
   const name = document.createElement("span");
   name.className = "slider-name";
-  name.textContent = label || `x${index + 1}`;
+  name.textContent = fallbackLabel;
 
   const valueBadge = document.createElement("span");
   valueBadge.className = "slider-value";
@@ -119,8 +156,10 @@ function createSliderRow(label, value, index) {
     renderBtn.disabled = sliderState.length === 0;
   });
 
-  row.appendChild(head);
-  row.appendChild(input);
+  detail.appendChild(head);
+  detail.appendChild(input);
+  body.appendChild(detail);
+  row.appendChild(body);
   return row;
 }
 
@@ -130,14 +169,21 @@ function buildSliderInterface(meta) {
     ? meta.range.slice(0, 2)
     : [0, 1];
   const defaults = meta && Array.isArray(meta.default) ? meta.default : labels.map(() => 0);
+  const thumbnails = meta && Array.isArray(meta.thumbnails) ? meta.thumbnails : [];
 
   sliderLabels = labels;
   sliderState = defaults.slice(0, labels.length);
+  sliderThumbnails = thumbnails.slice(0, labels.length);
 
   if (!sliderList) return;
   sliderList.innerHTML = "";
   labels.forEach((label, idx) => {
-    const row = createSliderRow(label, sliderState[idx] ?? sliderRange[0], idx);
+    const row = createSliderRow(
+      label,
+      sliderState[idx] ?? sliderRange[0],
+      idx,
+      sliderThumbnails[idx] || null,
+    );
     sliderList.appendChild(row);
   });
 

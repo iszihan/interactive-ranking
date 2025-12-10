@@ -153,6 +153,20 @@ class Engine:
 
         self.use_sdxl = True
         self.negative_prompt = config.get('negative_prompt', '')
+        example_dir = config.get('example_path')
+        self.example_base_dir: Path | None = None
+        self._example_cache: dict[str, Path | None] = {}
+        if example_dir:
+            try:
+                resolved = Path(str(example_dir)).expanduser()
+                if not resolved.is_absolute():
+                    resolved = (self.config_path.parent / resolved).resolve()
+                if resolved.exists():
+                    self.example_base_dir = resolved
+                else:
+                    print(f"[config] example_path not found: {resolved}")
+            except Exception as exc:
+                print(f"[config] Failed to resolve example_path {example_dir}: {exc}")
         self.infer_width = config.get('infer_width', 1024)
         self.infer_height = config.get('infer_height', 1024)
         self.infer_steps = config.get('infer_steps', 30)
@@ -308,6 +322,30 @@ class Engine:
             "control_img_path": self.control_img_path,
             "weight_idx": 1,
         }
+
+    def resolve_example_image(self, model_id: str) -> Path | None:
+        if not model_id or not self.example_base_dir:
+            return None
+        if model_id in self._example_cache:
+            return self._example_cache[model_id]
+
+        base_dir = self.example_base_dir / model_id
+        candidates = [
+            base_dir / f"ver_{model_id}_000.png",
+            base_dir / f"ver_{model_id}_000.jpg",
+            base_dir / f"ver_{model_id}_000.jpeg",
+            base_dir / f"ver_{model_id}_000.webp",
+            base_dir / f"ver_{model_id}_000.gif",
+            base_dir / f"ver_{model_id}_000.py",
+        ]
+
+        for candidate in candidates:
+            if candidate.exists():
+                self._example_cache[model_id] = candidate
+                return candidate
+
+        self._example_cache[model_id] = None
+        return None
 
     def save_state(self, reason: str | None = None, path: Path | str | None = None, *, force: bool = False) -> Path | None:
         target = path or self.save_state_path
@@ -581,9 +619,16 @@ class Engine:
 
     def get_slider_metadata(self) -> dict:
         labels = []
-        for comp in self.component_weights:
+        labels: list[str] = []
+        thumbnails: list[str | None] = []
+        model_ids: list[str] = []
+        for idx, comp in enumerate(self.component_weights):
             comp_path = Path(str(comp[0]))
-            labels.append(comp_path.stem)
+            model_id = comp_path.stem
+            labels.append(f"Slider {idx + 1}")
+            model_ids.append(model_id)
+            example_path = self.resolve_example_image(model_id)
+            thumbnails.append(f"/api/slider/example/{model_id}" if example_path else None)
         dim = len(labels)
         defaults = [0.0 for _ in range(dim)]
         return {
@@ -591,6 +636,8 @@ class Engine:
             "labels": labels,
             "range": list(self.x_range),
             "default": defaults,
+            "thumbnails": thumbnails,
+            "model_ids": model_ids,
         }
 
     def evaluate_slider_vector(self, values: List[float]) -> dict:
@@ -735,6 +782,19 @@ def _relative_output_url(path: str | Path | None) -> str | None:
     return f"/outputs/{rel.as_posix()}"
 
 
+def _guess_media_type(path: Path) -> str:
+    ext = path.suffix.lower()
+    mapping = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+        ".py": "text/plain",
+    }
+    return mapping.get(ext, "application/octet-stream")
+
+
 @app.get("/api/images")
 def images() -> JSONResponse:
     images = _list_image_urls()
@@ -743,6 +803,16 @@ def images() -> JSONResponse:
         "Pragma": "no-cache",
         "Expires": "0",
     })
+
+
+@app.get("/api/slider/example/{model_id}")
+def slider_example(model_id: str):
+    eng = _require_engine()
+    path = eng.resolve_example_image(model_id)
+    if not path:
+        return JSONResponse({"error": "Example image not found."}, status_code=404)
+    media_type = _guess_media_type(path)
+    return FileResponse(str(path), media_type=media_type)
 
 
 @app.post("/api/start")
