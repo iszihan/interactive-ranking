@@ -19,23 +19,35 @@ body{
   background: #f4f4f4;
   color: var(--text-primary);
   display: flex;
+  justify-content: center;
+  padding: 22px 16px 60px;
+}
+
+.app-shell{
+  width: min(1380px, 96vw);
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(480px, 1.6fr) minmax(260px, 0.95fr);
+  gap: 22px;
+  align-items: start;
+}
+
+.layout-column{
+  display: flex;
   flex-direction: column;
-  align-items: center;
-  padding: 28px 20px 80px;
-  gap: 16px;
+  gap: 14px;
 }
 
 .hidden{ display: none !important; }
 
 #source{
-  width: min(960px, 96vw);
-  border-radius: 16px;
-  padding: 14px 20px;
+  width: 100%;
+  border-radius: 14px;
+  padding: 10px 16px;
   background: var(--surface);
   display: flex;
   align-items: center;
-  gap: 16px;
-  font-size: 0.95rem;
+  gap: 12px;
+  font-size: 0.9rem;
   border: 1px solid var(--border);
   box-shadow: var(--shadow-soft);
 }
@@ -43,7 +55,9 @@ body{
 #status{ margin-left: auto; color: var(--text-muted); }
 
 #iterationIndicator{
-  padding: 6px 16px;
+  padding: 6px 20px;
+  min-width: 110px;
+  text-align: center;
   border-radius: 999px;
   border: 1px solid #d5dff7;
   background: #eef2ff;
@@ -53,7 +67,7 @@ body{
 }
 
 #controls{
-  width: min(960px, 96vw);
+  width: 100%;
   display: flex;
   justify-content: flex-start;
 }
@@ -63,8 +77,8 @@ body{
 #clearHistoryBtn{
   appearance: none;
   border-radius: 999px;
-  padding: 12px 30px;
-  font-size: 0.92rem;
+  padding: 10px 24px;
+  font-size: 0.88rem;
   font-weight: 600;
   letter-spacing: 0.04em;
   cursor: pointer;
@@ -101,7 +115,7 @@ body{
 }
 
 #referenceSection{
-  width: min(960px, 96vw);
+  width: 100%;
 }
 
 #referenceRow{
@@ -112,20 +126,20 @@ body{
 }
 
 .reference-card{
-  flex: 1 1 280px;
+  flex: 1 1 260px;
   background: var(--surface);
-  border-radius: 20px;
-  padding: 18px;
+  border-radius: 18px;
+  padding: 16px;
   border: 1px solid var(--border);
   box-shadow: var(--shadow-soft);
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 
 .reference-label,
 .preview-label{
-  font-size: 0.95rem;
+  font-size: 0.9rem;
   color: var(--text-muted);
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -151,13 +165,13 @@ body{
 }
 
 #sliderPanel{
-  width: min(960px, 96vw);
+  width: 100%;
   background: var(--surface);
-  border-radius: 26px;
-  padding: 26px;
+  border-radius: 22px;
+  padding: 22px;
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 18px;
   border: 1px solid var(--border);
   box-shadow: var(--shadow-soft);
 }
@@ -168,26 +182,26 @@ body{
 }
 
 .panel-title{
-  font-size: 1.4rem;
+  font-size: 1.25rem;
   font-weight: 600;
 }
 
 .panel-subtitle{
   color: var(--text-muted);
-  font-size: 0.95rem;
+  font-size: 0.9rem;
 }
 
 #sliderList{
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 14px;
 }
 
 .slider-row{
   background: var(--surface-muted);
   border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 14px 16px;
+  border-radius: 12px;
+  padding: 12px 14px;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -207,9 +221,9 @@ body{
 }
 
 .slider-thumb{
-  width: 74px;
-  height: 74px;
-  border-radius: 12px;
+  width: 68px;
+  height: 68px;
+  border-radius: 11px;
   border: 1px solid var(--border);
   background: var(--surface);
   overflow: hidden;
@@ -229,8 +243,8 @@ body{
   position: absolute;
   top: 50%;
   left: calc(100% + 8px);
-  width: 512px;
-  height: 512px;
+  width: 420px;
+  height: 420px;
   border-radius: 22px;
   border: 1px solid var(--border);
   background: var(--surface);
@@ -277,13 +291,13 @@ body{
 .slider-head-controls{
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .slider-number-input{
-  width: 90px;
-  padding: 6px 10px;
-  border-radius: 8px;
+  width: 80px;
+  padding: 5px 9px;
+  border-radius: 7px;
   border: 1px solid var(--border);
   background: #fff;
   font-size: 0.9rem;
@@ -302,7 +316,7 @@ body{
   -webkit-appearance: none;
   appearance: none;
   width: 100%;
-  height: 6px;
+  height: 5px;
   border-radius: 999px;
   background: #dfe6f5;
   outline: none;
@@ -311,8 +325,8 @@ body{
 
 .slider-row input[type=range]::-webkit-slider-thumb{
   -webkit-appearance: none;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
   background: var(--accent);
   border: 3px solid #fff;
@@ -320,8 +334,8 @@ body{
 }
 
 .slider-row input[type=range]::-moz-range-thumb{
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
   background: var(--accent);
   border: 3px solid #fff;
@@ -333,10 +347,10 @@ body{
 }
 
 #historySection{
-  width: min(960px, 96vw);
+  width: 100%;
   background: var(--surface);
-  border-radius: 22px;
-  padding: 20px;
+  border-radius: 20px;
+  padding: 18px;
   border: 1px solid var(--border);
   box-shadow: var(--shadow-soft);
 }
@@ -345,7 +359,7 @@ body{
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 18px;
+  margin-bottom: 14px;
 }
 
 .history-title{ font-weight: 600; }
@@ -353,15 +367,15 @@ body{
 
 #historyList{
   display: grid;
-  gap: 12px;
+  gap: 10px;
 }
 
 .history-entry{
   width: 100%;
   background: var(--surface-muted);
   border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 12px 14px;
+  border-radius: 12px;
+  padding: 10px 12px;
   display: grid;
   gap: 4px;
   font-family: inherit;
@@ -378,12 +392,21 @@ body{
 .history-entry-title{ font-weight: 600; }
 .history-entry-vector{
   color: var(--text-muted);
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   font-family: 'JetBrains Mono', 'Space Mono', monospace;
 }
 
+@media (max-width: 1180px){
+  .app-shell{
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+  body{
+    padding-bottom: 40px;
+  }
+}
+
 @media (max-width: 720px){
-  #source, #controls, #referenceSection, #sliderPanel, #historySection{ width: 100%; }
   #source{ flex-direction: column; align-items: flex-start; }
   #status{ margin-left: 0; }
   .slider-thumb-preview{ display: none; }
