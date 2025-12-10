@@ -2,6 +2,7 @@
 const container = document.getElementById("container");
 const startBtn = document.getElementById("startBtn");
 const statusEl = document.getElementById("status");
+const iterationIndicator = document.getElementById("iterationIndicator");
 const gallery = document.getElementById("gallery");
 const nextBtn = document.getElementById("nextBtn");
 const nextWrap = document.getElementById("nextWrap");
@@ -11,11 +12,13 @@ const referenceSection = document.getElementById("referenceSection");
 const referenceImg = document.getElementById("referenceImg");
 const zoomSection = document.getElementById("zoomSection");
 const zoomImg = document.getElementById("zoomImg");
+let currentIteration = null;
 
 // hide Next/ranking initially
 if (nextWrap) nextWrap.classList.add("hidden");
 if (rankSection) rankSection.classList.add("hidden");
 if (referenceSection) referenceSection.classList.add("hidden");
+if (iterationIndicator) iterationIndicator.classList.add("hidden");
 
 // ---------- drag-to-reorder ----------
 let draggingElem = null;
@@ -27,6 +30,23 @@ let selectedBrick = null;
 const DRAG_THRESHOLD_PX = 5;
 
 const SLOTS_BASE = "/slots"; // make sure this matches server
+
+function setIterationDisplay(value, { commit = true } = {}) {
+  if (!iterationIndicator) return;
+  if (value === null || value === undefined || value === "") {
+    if (commit) currentIteration = null;
+    iterationIndicator.textContent = "";
+    iterationIndicator.classList.add("hidden");
+    return;
+  }
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return;
+  }
+  if (commit) currentIteration = numeric;
+  iterationIndicator.textContent = `Iteration ${numeric+1}`;
+  iterationIndicator.classList.remove("hidden");
+}
 
 function updateReferenceImage(src) {
   if (!referenceSection || !referenceImg) return;
@@ -184,6 +204,8 @@ async function startProcess() {
     const resp = await fetch("/api/start", { method: "POST" });
     if (!resp.ok) throw new Error("start failed");
     const data = await resp.json();
+    const iterFromStart = Number(data.iteration ?? data.step);
+    setIterationDisplay(Number.isFinite(iterFromStart) ? iterFromStart : null);
     const images = data.images || [];
     updateReferenceImage(data.gt_image);
 
@@ -225,6 +247,7 @@ async function startProcess() {
   } catch (err) {
     statusEl.textContent = "Error: " + (err && err.message ? err.message : "unknown");
     updateReferenceImage(null);
+    setIterationDisplay(null);
   } finally {
     startBtn.disabled = false;
   }
@@ -286,10 +309,14 @@ let expected = 0;
 let received = 0;
 
 es.addEventListener("begin", (ev) => {
-  const { round, n } = JSON.parse(ev.data);
+  const { round, n, iteration } = JSON.parse(ev.data);
   currentRound = round;
   expected = n;
   received = 0;
+
+  if (iteration !== undefined) {
+    setIterationDisplay(iteration);
+  }
 
   if (nextBtn) nextBtn.disabled = true;
   // if (rankSection) rankSection.classList.add("hidden");
@@ -302,8 +329,11 @@ es.addEventListener("begin", (ev) => {
 window.addEventListener("resize", () => setTilesPerRow(expected || 6));
 
 es.addEventListener("slot", (ev) => {
-  const { round, slot } = JSON.parse(ev.data);
+  const { round, slot, iteration } = JSON.parse(ev.data);
   if (round !== currentRound) return;
+  if (iteration !== undefined) {
+    setIterationDisplay(iteration);
+  }
   setSlotImage(slot, round);
   received += 1;
   statusEl.textContent = `Loaded ${received}/${expected}`;
@@ -311,8 +341,12 @@ es.addEventListener("slot", (ev) => {
 });
 
 es.addEventListener("done", (ev) => {
-  const { round } = JSON.parse(ev.data);
+  const { round, iteration } = JSON.parse(ev.data);
   if (round !== currentRound) return;
+
+  if (iteration !== undefined) {
+    setIterationDisplay(iteration);
+  }
 
   statusEl.textContent = `Loaded ${received}/${expected}`;
   if (nextBtn) nextBtn.disabled = false;
@@ -343,6 +377,9 @@ if (nextBtn) {
     nextBtn.disabled = true;
     statusEl.textContent = "Starting…";
 
+    const previewIteration = (currentIteration ?? 0) + 1;
+    setIterationDisplay(previewIteration, { commit: false });
+
     // show skeleton now (guess N from current tiles or default)
     const nGuess = container.querySelectorAll(".brick").length || 6;
     renderPlaceholders(nGuess);
@@ -358,6 +395,7 @@ if (nextBtn) {
     } catch {
       statusEl.textContent = "Next failed.";
       nextBtn.disabled = false;
+      setIterationDisplay(currentIteration, { commit: false });
     }
   });
 }

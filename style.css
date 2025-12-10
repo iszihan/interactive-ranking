@@ -19,6 +19,34 @@ body{
   gap: 16px;
 }
 
+#source{
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  align-self: stretch;
+  width: 100%;
+  padding: 0 32px;
+  font-size: 0.95rem;
+  color: #444;
+}
+
+#status{
+  margin-left: auto;
+}
+
+#iterationIndicator{
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid #d5dff7;
+  background: #fff;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  /* text-transform: uppercase; */
+  color: #2f55a6;
+  font-size: 1.5em;
+}
+
 .hidden{ display: none !important; }
 
 #controls{ margin-bottom: 16px; }

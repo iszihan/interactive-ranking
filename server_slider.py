@@ -1,4 +1,4 @@
-# server_bo.py
+# server_slider.py
 import argparse
 import signal
 import atexit
@@ -230,6 +230,8 @@ class Engine:
         gpu_ids = config.get('gpu_ids', '')
         gpu_ids = [int(gid.strip())
                    for gid in str(gpu_ids).split(',') if gid.strip().isdigit()]
+        # Only keeps the first GPU since we don't run batch inference here
+        gpu_ids = [gpu_ids[0]]
         if gpu_ids:
             self.gpu_pool = MultiGPUInferPool(
                 gpu_ids=gpu_ids,
@@ -606,7 +608,7 @@ class Engine:
             restored = self.load_state()
 
         # Initialize mcmc cache regardless of restore state
-        get_mcmc_from_cache()
+        # get_mcmc_from_cache()
 
         self.clear_outputs()
         
@@ -689,6 +691,47 @@ class Engine:
         print(f'dim2loras: {dim2loras}')
 
         return lora2canon_dim, dim2loras, dim2dims
+
+    def get_slider_metadata(self) -> dict:
+        labels = []
+        for comp in self.component_weights:
+            comp_path = Path(str(comp[0]))
+            labels.append(comp_path.stem)
+        dim = len(labels)
+        defaults = [0.0 for _ in range(dim)]
+        return {
+            "dimension": dim,
+            "labels": labels,
+            "range": list(self.x_range),
+            "default": defaults,
+        }
+
+    def evaluate_slider_vector(self, values: List[float]) -> dict:
+        dim = len(self.component_weights)
+        if dim == 0:
+            raise ValueError("No components configured for slider evaluation.")
+        arr = np.asarray(values, dtype=np.float64)
+        if arr.ndim != 1 or arr.shape[0] != dim:
+            raise ValueError(f"Expected {dim} values, received {arr.shape[0] if arr.ndim == 1 else 'invalid shape'}.")
+
+        low, high = self.x_range
+        arr = np.nan_to_num(arr, nan=low, posinf=high, neginf=low)
+        arr = np.clip(arr, low, high)
+
+        sim_val, image_path = self.f(arr)
+        sim_scalar = float(np.asarray(sim_val).flatten()[0])
+        out_url = _relative_output_url(image_path)
+
+        if out_url is None and image_path:
+            out_url = str(image_path)
+
+        payload = {
+            "x": arr.tolist(),
+            "image": out_url,
+            "similarity": sim_scalar,
+            "timestamp": time.time(),
+        }
+        return payload
 
     def f_to_np(self, x):
         """Convert input tensor to numpy array for the objective function."""
@@ -932,7 +975,7 @@ def _require_engine() -> Engine:
     return engine
 
 
-app.mount("/static", StaticFiles(directory="."), name="static")
+app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR / "sliders")), name="static")
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 app.mount("/slots", StaticFiles(directory=str(SLOTS_DIR)), name="slots")
 
@@ -940,7 +983,10 @@ app.mount("/slots", StaticFiles(directory=str(SLOTS_DIR)), name="slots")
 @app.get("/")
 def serve_index():
     # Serve index.html from the same folder as this file
-    return FileResponse("index.html")
+    index_path = FRONTEND_DIR / "sliders" / "index.html"
+    if not index_path.exists():
+        raise RuntimeError(f"Frontend file missing: {index_path}")
+    return FileResponse(str(index_path))
 
 
 @app.get("/api/health")
@@ -1022,6 +1068,16 @@ def _list_image_urls() -> List[str]:
     return [f"{base}/{p.name}" for p in images]
 
 
+def _relative_output_url(path: str | Path | None) -> str | None:
+    if not path:
+        return None
+    try:
+        rel = Path(path).resolve().relative_to(OUTPUT_DIR.resolve())
+    except Exception:
+        return None
+    return f"/outputs/{rel.as_posix()}"
+
+
 @app.get("/api/images")
 def images() -> JSONResponse:
     images = _list_image_urls()
@@ -1038,33 +1094,35 @@ def start() -> JSONResponse:
     eng.start()
     gt_url = eng.get_gt_image_url()
     iteration = int(getattr(eng, "step", 0))
+    slider_meta = eng.get_slider_metadata()
+    initial_render_url = None
+    zero_vector = list(slider_meta.get("default") or [])
+    if slider_meta.get("dimension", 0) > 0 and zero_vector:
+        try:
+            zero_result = eng.evaluate_slider_vector(zero_vector)
+            initial_render_url = zero_result.get("image")
+            slider_meta["default"] = zero_result.get("x", zero_vector)
+        except Exception as exc:
+            print(f"[start] Failed zero-vector render: {exc}")
 
-    MIN_COUNT = 1          # how many images make a “batch”
-    WAIT_TIMEOUT = 120.0
-    deadline = time.monotonic() + WAIT_TIMEOUT
-    while time.monotonic() < deadline:
-        images = _list_image_urls()
-        if len(images) >= MIN_COUNT:
-            print(f"Returning {len(images)} images from {OUTPUT_DIR}")
-            return JSONResponse({
-                "images": images,
-                "gt_image": gt_url,
-                "iteration": iteration,
-            }, headers={"Cache-Control": "no-store"})
-        time.sleep(0.2)  # small sleep to avoid busy-wait
+    images = _list_image_urls()
+    latest_image = initial_render_url or (images[-1] if images else None)
 
-    # timed out (engine failed or took too long)
     return JSONResponse({
-        "status": "pending",
-        "images": [],
         "gt_image": gt_url,
         "iteration": iteration,
-    }, status_code=202)
+        "slider": slider_meta,
+        "latest_image": latest_image,
+    }, headers={"Cache-Control": "no-store"})
 
 
 class NextRequest(BaseModel):
     ranking: List[str]
     n: Optional[int] = None
+
+
+class SliderEvalRequest(BaseModel):
+    vector: List[float]
 
 
 # helper: get "foo.png" from any string, ignore blob:
@@ -1113,6 +1171,25 @@ async def next_step(req: NextRequest) -> JSONResponse:
         "accepted_ranking": basenames,
         "selected_basename": getattr(eng, "last_selected_basename", None),
     })
+
+
+@app.post("/api/slider/eval")
+async def api_slider_eval(req: SliderEvalRequest) -> JSONResponse:
+    eng = _require_engine()
+    if eng.gpu_pool and not eng._pool_warmed:
+        eng._warmup_gpu_pool()
+
+    try:
+        result = await asyncio.to_thread(
+            eng.evaluate_slider_vector,
+            req.vector,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/events")
@@ -1202,5 +1279,5 @@ if __name__ == "__main__":
             f"[cli] Using engine save state path override: {STATE_SAVE_PATH_OVERRIDE}")
 
     _register_shutdown_handlers()
-    # uvicorn.run("server_bo:app", host="127.0.0.1", port=8000, reload=True)
-    uvicorn.run("server_bo:app", host="0.0.0.0", port=8000, reload=True)
+    # uvicorn.run("server_slider:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("server_slider:app", host="0.0.0.0", port=8000, reload=True)
