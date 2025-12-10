@@ -21,6 +21,15 @@ let sliderState = [];
 let sliderThumbnails = [];
 let historyEntries = [];
 
+function clampSliderValue(value) {
+  const min = Number(sliderRange[0] ?? 0);
+  const max = Number(sliderRange[1] ?? 1);
+  if (!Number.isFinite(value)) return min;
+  if (value < min) return min;
+  if (value > max) return max;
+  return value;
+}
+
 function canonicalizeImage(src) {
   if (typeof src !== "string" || !src) return null;
   return src.split("?")[0];
@@ -123,13 +132,12 @@ function updateSliderInputsFromState() {
     const idx = Number(input.dataset.index);
     const nextVal = sliderState[idx] ?? sliderRange[0];
     input.value = nextVal;
-    const valueBadge = sliderList.querySelector(`.slider-value[data-index="${idx}"]`);
-    if (valueBadge) valueBadge.textContent = formatSliderValue(nextVal);
   });
-}
-
-function handleSliderChange(idx, rawValue) {
-  sliderState[idx] = Number(rawValue);
+  sliderList.querySelectorAll("input.slider-number-input").forEach((input) => {
+    const idx = Number(input.dataset.index);
+    const nextVal = sliderState[idx] ?? sliderRange[0];
+    input.value = Number(nextVal).toFixed(3);
+  });
 }
 
 function createSliderRow(label, value, index, thumbnailUrl) {
@@ -179,31 +187,65 @@ function createSliderRow(label, value, index, thumbnailUrl) {
   name.className = "slider-name";
   name.textContent = fallbackLabel;
 
-  const valueBadge = document.createElement("span");
-  valueBadge.className = "slider-value";
-  valueBadge.dataset.index = index;
-  valueBadge.textContent = formatSliderValue(value);
+  const controlsWrap = document.createElement("div");
+  controlsWrap.className = "slider-head-controls";
+
+  const rangeInput = document.createElement("input");
+  rangeInput.type = "range";
+  rangeInput.min = sliderRange[0];
+  rangeInput.max = sliderRange[1];
+  rangeInput.step = Math.max(0.001, (sliderRange[1] - sliderRange[0]) / 200);
+  rangeInput.value = value;
+  rangeInput.dataset.index = index;
+
+  const numberInput = document.createElement("input");
+  numberInput.type = "number";
+  numberInput.className = "slider-number-input";
+  numberInput.min = sliderRange[0];
+  numberInput.max = sliderRange[1];
+  numberInput.step = Math.max(0.001, (sliderRange[1] - sliderRange[0]) / 200);
+  numberInput.value = Number(value).toFixed(3);
+  numberInput.dataset.index = index;
+
+  controlsWrap.appendChild(numberInput);
 
   head.appendChild(name);
-  head.appendChild(valueBadge);
+  head.appendChild(controlsWrap);
 
-  const input = document.createElement("input");
-  input.type = "range";
-  input.min = sliderRange[0];
-  input.max = sliderRange[1];
-  input.step = Math.max(0.001, (sliderRange[1] - sliderRange[0]) / 200);
-  input.value = value;
-  input.dataset.index = index;
+  numberInput.addEventListener("input", (event) => {
+    const raw = String(event.target.value || "").trim();
+    if (raw === "" || raw === "-" || raw === "." || raw === "-." ) {
+      return;
+    }
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed)) return;
+    const clamped = clampSliderValue(parsed);
+    sliderState[index] = clamped;
+    rangeInput.value = clamped;
+    if (renderBtn) renderBtn.disabled = sliderState.length === 0;
+  });
 
-  input.addEventListener("input", (event) => {
+  numberInput.addEventListener("blur", () => {
+    const committed = sliderState[index] ?? sliderRange[0];
+    numberInput.value = Number(committed).toFixed(3);
+  });
+
+  numberInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      numberInput.blur();
+    }
+  });
+
+  rangeInput.addEventListener("input", (event) => {
     const val = Number(event.target.value);
-    valueBadge.textContent = formatSliderValue(val);
-    handleSliderChange(index, val);
-    renderBtn.disabled = sliderState.length === 0;
+    const clamped = clampSliderValue(val);
+    sliderState[index] = clamped;
+    numberInput.value = clamped.toFixed(3);
+    if (renderBtn) renderBtn.disabled = sliderState.length === 0;
   });
 
   detail.appendChild(head);
-  detail.appendChild(input);
+  detail.appendChild(rangeInput);
   body.appendChild(detail);
   row.appendChild(body);
   return row;

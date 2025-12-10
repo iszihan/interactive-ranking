@@ -33,7 +33,7 @@ from engine import (obj_sim, infer_image_img2img, infer_image)
 from async_multi_gpu_pool import MultiGPUInferPool
 from serialize import save_slider_state, load_slider_state, apply_slider_engine_state
 
-CONFIG_FILE = Path(__file__).parent.resolve() / "config.yml"
+CONFIG_FILE = Path(__file__).parent.resolve() / "config_slider.yml"
 
 FRONTEND_DIR = Path(__file__).parent.resolve()
 OUTPUT_DIR = FRONTEND_DIR / "outputs"

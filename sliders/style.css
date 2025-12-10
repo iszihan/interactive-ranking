@@ -274,6 +274,30 @@ body{
   font-variant-numeric: tabular-nums;
 }
 
+.slider-head-controls{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.slider-number-input{
+  width: 90px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #fff;
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.slider-number-input:focus{
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(79, 142, 247, 0.15);
+}
+
 .slider-row input[type=range]{
   -webkit-appearance: none;
   appearance: none;
