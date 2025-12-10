@@ -71,7 +71,6 @@ app = FastAPI()
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-SLIDER_HISTORY_LIMIT = 20
 
 # helpers ------------------------------------------------------------
 
@@ -168,7 +167,8 @@ class Engine:
                 else:
                     print(f"[config] example_path not found: {resolved}")
             except Exception as exc:
-                print(f"[config] Failed to resolve example_path {example_dir}: {exc}")
+                print(
+                    f"[config] Failed to resolve example_path {example_dir}: {exc}")
         self.infer_width = config.get('infer_width', 1024)
         self.infer_height = config.get('infer_height', 1024)
         self.infer_steps = config.get('infer_steps', 30)
@@ -363,8 +363,6 @@ class Engine:
             "timestamp": float(payload.get("timestamp") or time.time()),
         }
         self.slider_history.insert(0, entry)
-        if len(self.slider_history) > SLIDER_HISTORY_LIMIT:
-            del self.slider_history[SLIDER_HISTORY_LIMIT:]
 
     def get_slider_history_payload(self) -> list[dict]:
         history_payload: list[dict] = []
@@ -379,7 +377,6 @@ class Engine:
                 "timestamp": entry.get("timestamp"),
             })
         return history_payload
-
 
     def _build_worker_payload(self, x_vector: np.ndarray) -> dict:
         state = copy.deepcopy(self.worker_state_template or {})
@@ -609,7 +606,8 @@ class Engine:
             labels.append(f"Slider {idx + 1}")
             model_ids.append(model_id)
             example_path = self.resolve_example_image(model_id)
-            thumbnails.append(f"/api/slider/example/{model_id}" if example_path else None)
+            thumbnails.append(
+                f"/api/slider/example/{model_id}" if example_path else None)
         dim = len(labels)
         defaults = [0.0 for _ in range(dim)]
         return {
@@ -676,7 +674,8 @@ def _save_slider_checkpoint(eng: Engine, reason: str | None = None, path: Path |
         return None
     try:
         saved_path = save_slider_state(eng, target, reason=reason)
-        print(f"Saved engine state to {saved_path} ({reason or 'unspecified'})")
+        print(
+            f"Saved engine state to {saved_path} ({reason or 'unspecified'})")
         return saved_path
     except Exception as exc:
         print(f"Failed to save engine state to {target}: {exc}")
@@ -700,13 +699,15 @@ def _load_slider_checkpoint(eng: Engine, *, path: Path | str | None = None,
         return False
     try:
         payload = load_slider_state(target)
-        saved_meta = payload.get("metadata", {}) if isinstance(payload, dict) else {}
+        saved_meta = payload.get("metadata", {}) if isinstance(
+            payload, dict) else {}
         saved_config = saved_meta.get("config_path")
         if saved_config:
             try:
                 saved_path = Path(saved_config).resolve()
                 if saved_path != eng.config_path:
-                    print(f"Warning: loading state from {saved_path} while current config is {eng.config_path}")
+                    print(
+                        f"Warning: loading state from {saved_path} while current config is {eng.config_path}")
             except Exception:
                 pass
         apply_slider_engine_state(eng, payload, torch.device(device))
@@ -744,7 +745,8 @@ def api_save_state(payload: dict | None = Body(default=None)) -> JSONResponse:
     path = data.get("path")
     reason = data.get("reason") or "api"
     force = bool(data.get("force", False))
-    saved_path = _save_slider_checkpoint(eng, reason=reason, path=path, force=force)
+    saved_path = _save_slider_checkpoint(
+        eng, reason=reason, path=path, force=force)
     if not saved_path:
         return JSONResponse({
             "saved": False,
@@ -762,7 +764,8 @@ async def api_load_state(payload: dict | None = Body(default=None)) -> JSONRespo
     reset = data.get("reset")
     if reset is None:
         reset = True
-    loaded = _load_slider_checkpoint(eng, path=path, reset=bool(reset), force=force)
+    loaded = _load_slider_checkpoint(
+        eng, path=path, reset=bool(reset), force=force)
     if loaded and eng.gpu_pool:
         eng._warmup_gpu_pool()
 

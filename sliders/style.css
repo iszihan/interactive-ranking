@@ -73,8 +73,7 @@ body{
 }
 
 #controls button,
-.panel-actions button,
-#clearHistoryBtn{
+.panel-actions button{
   appearance: none;
   border-radius: 999px;
   padding: 10px 24px;
@@ -90,8 +89,7 @@ body{
 }
 
 #controls button:hover,
-.panel-actions button:hover,
-#clearHistoryBtn:hover{
+.panel-actions button:hover{
   background: var(--accent-hover);
   border-color: var(--accent-hover);
   transform: translateY(-1px);
@@ -102,15 +100,6 @@ body{
   background: #c8d8fb;
   border-color: #c8d8fb;
   cursor: not-allowed;
-  box-shadow: none;
-}
-
-#clearHistoryBtn{
-  margin-left: auto;
-  padding: 10px 20px;
-  background: transparent;
-  color: var(--text-muted);
-  border-color: var(--border);
   box-shadow: none;
 }
 

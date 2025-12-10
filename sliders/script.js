@@ -12,7 +12,6 @@ const sliderList = document.getElementById("sliderList");
 const renderBtn = document.getElementById("renderBtn");
 const historySection = document.getElementById("historySection");
 const historyList = document.getElementById("historyList");
-const clearHistoryBtn = document.getElementById("clearHistoryBtn");
 
 let currentIteration = null;
 let sliderRange = [0, 1];
@@ -20,6 +19,8 @@ let sliderLabels = [];
 let sliderState = [];
 let sliderThumbnails = [];
 let historyEntries = [];
+
+const HISTORY_EPSILON = 1e-4;
 
 function clampSliderValue(value) {
   const min = Number(sliderRange[0] ?? 0);
@@ -66,6 +67,29 @@ function buildHistoryEntry(raw) {
     timestamp,
     label: formatHistoryTimestamp(timestamp),
   };
+}
+
+function formatScalarValue(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "0";
+  const fixed = numeric.toFixed(3);
+  return Number(fixed).toString();
+}
+
+function describeNonZeroWeights(entry) {
+  if (!entry || !Array.isArray(entry.x)) return "";
+  const parts = [];
+  entry.x.forEach((value, idx) => {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return;
+    if (Math.abs(numeric) <= HISTORY_EPSILON) return;
+    const label = sliderLabels[idx] || `Slider ${idx + 1}`;
+    parts.push(`${label}: ${formatScalarValue(numeric)}`);
+  });
+  if (!parts.length) {
+    return "All sliders at 0";
+  }
+  return parts.join(" · ");
 }
 
 function hydrateHistoryFromPayload(payload) {
@@ -298,7 +322,7 @@ function renderHistory() {
 
     const vector = document.createElement("span");
     vector.className = "history-entry-vector";
-    vector.textContent = entry.x.map((v) => v.toFixed(2)).join(" · ");
+    vector.textContent = describeNonZeroWeights(entry);
 
     button.appendChild(title);
     button.appendChild(vector);
@@ -417,12 +441,4 @@ async function renderFromSliders(options = {}) {
 
 if (renderBtn) {
   renderBtn.addEventListener("click", renderFromSliders);
-}
-
-if (clearHistoryBtn) {
-  clearHistoryBtn.addEventListener("click", () => {
-    historyEntries = [];
-    renderHistory();
-    statusEl.textContent = "History cleared.";
-  });
 }
