@@ -6,52 +6,57 @@
   <script src="/static/script.js" defer></script>
 </head>
 <body>
-  <div id=source>
-    <span id="iterationIndicator" class="iteration hidden"></span>
-    <span id="status"></span>
-    <!-- <a href=https://github.com/alecjacobson/interactive-ranking>https://github.com/alecjacobson/interactive-ranking</a> -->
-  </div>
-  <div id="controls">
-    <button id="startBtn">Start</button>
-  </div>
-
-  <div id="referenceSection" class="hidden">
-    <div id="referenceRow">
-      <div class="reference-card">
-        <div class="reference-label">Match this image</div>
-        <div class="reference-brick">
-          <img id="referenceImg" alt="Target reference" />
+  <div class="app-shell">
+    <div class="layout-column left-stack">
+      <div id=source>
+        <span id="iterationIndicator" class="iteration hidden"></span>
+        <span id="status"></span>
+      </div>
+      <div id="controls">
+        <button id="startBtn">Start</button>
+      </div>
+      <div id="referenceSection" class="hidden">
+        <div id="referenceRow">
+          <div class="reference-card">
+            <div class="reference-label">Match this image</div>
+            <div class="reference-brick">
+              <img id="referenceImg" alt="Target reference" />
+            </div>
+          </div>
+          <div id="previewSection" class="reference-card hidden">
+            <div class="preview-label">Latest render</div>
+            <div class="preview-brick">
+              <img id="previewImg" alt="Slider preview" />
+            </div>
+          </div>
         </div>
       </div>
-      <div id="previewSection" class="reference-card hidden">
-        <div class="preview-label">Latest render</div>
-        <div class="preview-brick">
-          <img id="previewImg" alt="Slider preview" />
+    </div>
+
+    <div class="layout-column middle-stack">
+      <div id="sliderPanel" class="hidden">
+        <div class="panel-header">
+          <div class="panel-title">Adjust mixture weights</div>
+          <div class="panel-subtitle">Tune each component and render a new candidate.</div>
+        </div>
+        <div id="sliderList"></div>
+        <div class="panel-actions">
+          <button id="renderBtn" disabled>Render Image</button>
         </div>
       </div>
     </div>
-  </div>
 
-  <div id="sliderPanel" class="hidden">
-    <div class="panel-header">
-      <div class="panel-title">Adjust mixture weights</div>
-      <div class="panel-subtitle">Tune each component and render a new candidate.</div>
-    </div>
-    <div id="sliderList"></div>
-    <div class="panel-actions">
-      <button id="renderBtn" disabled>Render Image</button>
-    </div>
-  </div>
-
-  <div id="historySection" class="hidden">
-    <div class="history-header">
-      <div>
-        <div class="history-title">Recent renders</div>
-        <div class="history-subtitle">Click any entry to re-load its sliders.</div>
+    <div class="layout-column right-stack">
+      <div id="historySection" class="hidden">
+        <div class="history-header">
+          <div>
+            <div class="history-title">Recent renders</div>
+            <div class="history-subtitle">Click any entry to re-load its sliders.</div>
+          </div>
+        </div>
+        <div id="historyList"></div>
       </div>
-      <button id="clearHistoryBtn" type="button">Clear</button>
     </div>
-    <div id="historyList"></div>
   </div>
 </body>
 </html>
