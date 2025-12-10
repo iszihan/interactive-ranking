@@ -6,6 +6,7 @@ const iterationIndicator = document.getElementById("iterationIndicator");
 const gallery = document.getElementById("gallery");
 const nextBtn = document.getElementById("nextBtn");
 const nextWrap = document.getElementById("nextWrap");
+const stageBtn = document.getElementById("stageBtn");
 const rankSection = document.getElementById("rankSection");
 const controls = document.getElementById("controls");
 const referenceSection = document.getElementById("referenceSection");
@@ -13,6 +14,67 @@ const referenceImg = document.getElementById("referenceImg");
 const zoomSection = document.getElementById("zoomSection");
 const zoomImg = document.getElementById("zoomImg");
 let currentIteration = null;
+
+const defaultStageState = {
+  hasStages: false,
+  nextStageReady: false,
+  nextStageNumber: null,
+  currentStage: 1,
+  totalStages: 1,
+  iterations: [],
+};
+let stageState = { ...defaultStageState };
+let isGenerationInFlight = false;
+
+function normalizeStagePayload(stage) {
+  if (!stage || typeof stage !== "object") {
+    return { ...defaultStageState, iterations: [] };
+  }
+  const normalized = {
+    ...defaultStageState,
+    ...stage,
+  };
+  normalized.iterations = Array.isArray(stage.iterations) ? [...stage.iterations] : [];
+  normalized.hasStages = Boolean(stage.hasStages || normalized.iterations.length);
+  normalized.nextStageReady = Boolean(normalized.hasStages && stage.nextStageReady);
+  if (!Number.isFinite(normalized.currentStage)) {
+    normalized.currentStage = 1;
+  }
+  if (!Number.isFinite(normalized.totalStages)) {
+    normalized.totalStages = normalized.hasStages ? normalized.iterations.length + 1 : 1;
+  }
+  if ((normalized.nextStageNumber === null || normalized.nextStageNumber === undefined) && normalized.hasStages) {
+    normalized.nextStageNumber = normalized.currentStage + 1;
+  }
+  return normalized;
+}
+
+function applyStagePayload(stage) {
+  stageState = normalizeStagePayload(stage);
+  updateActionButtons();
+}
+
+function updateActionButtons() {
+  const stageReady = stageState.hasStages && stageState.nextStageReady;
+  if (nextBtn) {
+    nextBtn.disabled = Boolean(isGenerationInFlight || stageReady);
+  }
+  if (stageBtn) {
+    const shouldShow = stageReady;
+    stageBtn.classList.toggle("hidden", !shouldShow);
+    stageBtn.disabled = Boolean(isGenerationInFlight);
+    if (shouldShow) {
+      const labelNumber = Number.isFinite(stageState.nextStageNumber)
+        ? stageState.nextStageNumber
+        : stageState.currentStage + 1;
+      stageBtn.textContent = Number.isFinite(labelNumber)
+        ? `Start Stage ${labelNumber}`
+        : "Start Next Stage";
+    }
+  }
+}
+
+updateActionButtons();
 
 // hide Next/ranking initially
 if (nextWrap) nextWrap.classList.add("hidden");
@@ -204,6 +266,11 @@ async function startProcess() {
     const resp = await fetch("/api/start", { method: "POST" });
     if (!resp.ok) throw new Error("start failed");
     const data = await resp.json();
+    if (data.stage) {
+      applyStagePayload(data.stage);
+    } else {
+      updateActionButtons();
+    }
     const iterFromStart = Number(data.iteration ?? data.step);
     setIterationDisplay(Number.isFinite(iterFromStart) ? iterFromStart : null);
     const images = data.images || [];
@@ -211,39 +278,9 @@ async function startProcess() {
 
     if (controls) controls.classList.add("hidden");
 
-    container.innerHTML = "";
-    clearZoomSelection();
-    container.style.display = "flex";
-    container.style.flexDirection = "row";
-    container.style.flexWrap = "nowrap";
-    container.style.gap = "12px";
-    container.style.overflowX = "auto";
+    const renderedCount = renderImageList(images);
 
-    for (const src of images) {
-      const div = document.createElement("div");
-      div.className = "brick";
-      const img = document.createElement("img");
-
-      const canonical = src.split("?")[0]; // strip any cache-buster
-      img.src = `${canonical}?v=${Date.now()}`;
-      img.alt = "";
-      img.style.maxWidth = "100%";
-      img.style.display = "block";
-
-      // keep real filename metadata for ranking (no blob:)
-      img.dataset.basename = canonical.split("/").pop();
-      img.dataset.src = canonical;
-
-      div.appendChild(img);
-      container.appendChild(div);
-    }
-
-    if (rankSection) rankSection.classList.remove("hidden");
-    if (nextWrap) nextWrap.classList.remove("hidden");
-
-    statusEl.textContent = images.length ? `Loaded ${images.length} images` : "No images returned";
-
-    setTilesPerRow(images.length || 6);
+    statusEl.textContent = renderedCount ? `Loaded ${renderedCount} images` : "No images returned";
   } catch (err) {
     statusEl.textContent = "Error: " + (err && err.message ? err.message : "unknown");
     updateReferenceImage(null);
@@ -283,6 +320,42 @@ function renderPlaceholders(n) {
   }
 }
 
+function renderImageList(images) {
+  if (!container) return 0;
+  const list = Array.isArray(images) ? images : [];
+
+  container.innerHTML = "";
+  clearZoomSelection();
+  container.style.display = "flex";
+  container.style.flexDirection = "row";
+  container.style.flexWrap = "nowrap";
+  container.style.gap = "12px";
+  container.style.overflowX = "auto";
+
+  for (const src of list) {
+    const div = document.createElement("div");
+    div.className = "brick";
+    const img = document.createElement("img");
+
+    const canonical = src.split("?")[0];
+    img.src = `${canonical}?v=${Date.now()}`;
+    img.alt = "";
+    img.style.maxWidth = "100%";
+    img.style.display = "block";
+    img.dataset.basename = canonical.split("/").pop();
+    img.dataset.src = canonical;
+
+    div.appendChild(img);
+    container.appendChild(div);
+  }
+
+  if (rankSection) rankSection.classList.remove("hidden");
+  if (nextWrap) nextWrap.classList.remove("hidden");
+
+  setTilesPerRow(list.length || 6);
+  return list.length;
+}
+
 async function setSlotImage(slot, round) {
   const brick = container.querySelector(`.brick[data-slot="${slot}"]`);
   if (!brick) return;
@@ -309,7 +382,8 @@ let expected = 0;
 let received = 0;
 
 es.addEventListener("begin", (ev) => {
-  const { round, n, iteration } = JSON.parse(ev.data);
+  const payload = JSON.parse(ev.data);
+  const { round, n, iteration, stage } = payload;
   currentRound = round;
   expected = n;
   received = 0;
@@ -318,7 +392,12 @@ es.addEventListener("begin", (ev) => {
     setIterationDisplay(iteration);
   }
 
-  if (nextBtn) nextBtn.disabled = true;
+  isGenerationInFlight = true;
+  if (stage) {
+    applyStagePayload(stage);
+  } else {
+    updateActionButtons();
+  }
   // if (rankSection) rankSection.classList.add("hidden");
 
   renderPlaceholders(n);
@@ -341,7 +420,8 @@ es.addEventListener("slot", (ev) => {
 });
 
 es.addEventListener("done", (ev) => {
-  const { round, iteration } = JSON.parse(ev.data);
+  const payload = JSON.parse(ev.data);
+  const { round, iteration, stage } = payload;
   if (round !== currentRound) return;
 
   if (iteration !== undefined) {
@@ -349,13 +429,51 @@ es.addEventListener("done", (ev) => {
   }
 
   statusEl.textContent = `Loaded ${received}/${expected}`;
-  if (nextBtn) nextBtn.disabled = false;
+  isGenerationInFlight = false;
+  if (stage) {
+    applyStagePayload(stage);
+  } else {
+    updateActionButtons();
+  }
 });
 
 es.onerror = () => {
   statusEl.textContent = "Stream error.";
-  if (nextBtn) nextBtn.disabled = false;
+  isGenerationInFlight = false;
+  updateActionButtons();
 };
+
+es.addEventListener("stage", (ev) => {
+  try {
+    const payload = JSON.parse(ev.data);
+    if (payload && payload.stage) {
+      applyStagePayload(payload.stage);
+    }
+    if (payload && Array.isArray(payload.images) && payload.images.length) {
+      renderImageList(payload.images);
+    }
+  } catch (err) {
+    console.error("stage event parse failed", err);
+  }
+});
+
+async function refreshStageStatus() {
+  try {
+    const resp = await fetch("/api/stage/status");
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (data && data.stage) {
+      applyStagePayload(data.stage);
+    }
+    if (data && Array.isArray(data.images) && data.images.length) {
+      renderImageList(data.images);
+    }
+  } catch (err) {
+    console.warn("stage status refresh failed", err);
+  }
+}
+
+refreshStageStatus();
 
 // ---------- ranking ----------
 function getRanking() {
@@ -373,8 +491,14 @@ function getRanking() {
 
 if (nextBtn) {
   nextBtn.addEventListener("click", async () => {
+    if (stageState.hasStages && stageState.nextStageReady) {
+      statusEl.textContent = "Start the next stage before continuing.";
+      updateActionButtons();
+      return;
+    }
     const order = getRanking();
-    nextBtn.disabled = true;
+    isGenerationInFlight = true;
+    updateActionButtons();
     statusEl.textContent = "Starting…";
 
     const previewIteration = (currentIteration ?? 0) + 1;
@@ -386,16 +510,67 @@ if (nextBtn) {
     setTilesPerRow(nGuess);
 
     try {
-      await fetch("/api/next", {
+      const resp = await fetch("/api/next", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ranking: order })
       });
+      if (!resp.ok) {
+        throw new Error("Next failed.");
+      }
       // SSE will drive begin/slot/done
-    } catch {
-      statusEl.textContent = "Next failed.";
-      nextBtn.disabled = false;
+    } catch (err) {
+      statusEl.textContent = err && err.message ? err.message : "Next failed.";
+      isGenerationInFlight = false;
+      updateActionButtons();
       setIterationDisplay(currentIteration, { commit: false });
+    }
+  });
+}
+
+if (stageBtn) {
+  stageBtn.addEventListener("click", async () => {
+    if (isGenerationInFlight) return;
+    stageBtn.disabled = true;
+    if (statusEl) statusEl.textContent = "Advancing to next stage…";
+    try {
+      const resp = await fetch("/api/stage/next", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      let data = {};
+      try {
+        data = await resp.json();
+      } catch {
+        data = {};
+      }
+      if (data && data.stage) {
+        applyStagePayload(data.stage);
+      } else {
+        updateActionButtons();
+      }
+      if (!resp.ok) {
+        const reasonCode = data && data.reason ? String(data.reason) : null;
+        let friendly = "Next stage unavailable.";
+        if (reasonCode === "not-ready") friendly = "Finish the current stage before advancing.";
+        else if (reasonCode === "no-stages") friendly = "No additional stages are configured.";
+        else if (reasonCode === "completed") friendly = "All configured stages are complete.";
+        throw new Error(friendly);
+      }
+
+      const rendered = renderImageList(data && Array.isArray(data.images) ? data.images : []);
+      if (statusEl) {
+        statusEl.textContent = rendered
+          ? `Next stage initialized with ${rendered} candidates.`
+          : "Next stage initialized. Waiting for new images…";
+      }
+    } catch (err) {
+      if (statusEl) {
+        statusEl.textContent = `Next stage unavailable: ${err && err.message ? err.message : "unknown error"}`;
+      }
+    } finally {
+      updateActionButtons();
     }
   });
 }

@@ -100,6 +100,7 @@ def export_engine_state(engine: "Engine") -> Dict[str, Any]:
             "state_loaded": getattr(engine, "state_loaded", False),
             "ranking_history": history_payload,
             "last_round_context": getattr(engine, "last_round_context", None),
+            "stage_index": getattr(engine, "stage_index", 0),
         }
     }
     return state
@@ -187,6 +188,12 @@ def apply_engine_state(engine: "Engine", payload: Dict[str, Any], device: torch.
     engine.state_loaded = True
 
     meta = payload.get("metadata", {})
+    stage_index_value = engine_payload.get("stage_index")
+    if stage_index_value is not None:
+        try:
+            engine.stage_index = max(0, int(stage_index_value))
+        except Exception:
+            pass
 
 
 def export_slider_history(engine: "Engine") -> list[Dict[str, Any]]:
@@ -245,6 +252,7 @@ def export_slider_state(engine: "Engine") -> Dict[str, Any]:
         "component_weights": getattr(engine, "component_weights", []),
         "x_record": _dict_to_serializable(getattr(engine, "x_record", {})),
         "last_round_context": getattr(engine, "last_round_context", None),
+        "stage_index": getattr(engine, "stage_index", 0),
         "slider_history": export_slider_history(engine),
     }
 
@@ -318,5 +326,11 @@ def apply_slider_engine_state(engine: "Engine", payload: Dict[str, Any], device:
     if slider_payload is None and isinstance(payload, dict):
         slider_payload = payload.get("slider_history")
     apply_slider_history(engine, slider_payload if isinstance(slider_payload, list) else None)
+
+    if "stage_index" in engine_payload:
+        try:
+            engine.stage_index = max(0, int(engine_payload.get("stage_index", engine.stage_index)))
+        except Exception:
+            pass
 
     engine.state_loaded = True

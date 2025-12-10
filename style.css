@@ -85,6 +85,21 @@ body{
   color: #fff;
 }
 
+#stageBtn{
+  border-color: #fb8f5a;
+  background: #fb6d28;
+}
+
+#stageBtn:hover{
+  background: #da5c20;
+  border-color: #da5c20;
+}
+
+#stageBtn:disabled{
+  background: #f8b798;
+  border-color: #f8b798;
+}
+
 #referenceSection{
   width: min(92vw, 920px);
   margin: 0 auto;
@@ -174,7 +189,10 @@ body{
 #nextWrap{
   position: fixed;
   left: 0; right: 0; bottom: 16px;
-  display: flex; justify-content: center;
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  flex-wrap: wrap;
   pointer-events: none;
 }
 #nextWrap button{ pointer-events: auto; }
