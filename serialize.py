@@ -61,6 +61,11 @@ def export_engine_state(engine: "Engine") -> Dict[str, Any]:
     for item in getattr(engine, "ranking_history", []) or []:
         if not isinstance(item, dict):
             continue
+        train_version_value = item.get("train_version", 0)
+        try:
+            train_version_value = int(train_version_value)
+        except (TypeError, ValueError):
+            train_version_value = 0
         history_payload.append({
             "step": int(item.get("step", 0)),
             "round": int(item.get("round", 0)),
@@ -68,6 +73,23 @@ def export_engine_state(engine: "Engine") -> Dict[str, Any]:
             "indices": [int(x) for x in item.get("indices", [])],
             "selected": item.get("selected"),
             "saved_at": item.get("saved_at"),
+            "train_version": train_version_value,
+        })
+
+    train_history_payload: list[Dict[str, Any]] = []
+    for snapshot in getattr(engine, "train_dataset_history", []) or []:
+        if not isinstance(snapshot, dict):
+            continue
+        train_history_payload.append({
+            "version": int(snapshot.get("version", 0)),
+            "stage_index": int(snapshot.get("stage_index", 0)),
+            "step": int(snapshot.get("step", 0)),
+            "reason": snapshot.get("reason"),
+            "train_X": _tensor_to_list(snapshot.get("train_X")),
+            "Y": _tensor_to_list(snapshot.get("Y")),
+            "lora_merge_indices": [int(i) for i in snapshot.get("lora_merge_indices", [])],
+            "lora_merge_weights": [float(w) for w in snapshot.get("lora_merge_weights", [])],
+            "dim_index_per_lora": [int(i) for i in snapshot.get("dim_index_per_lora", [])],
         })
 
     state: Dict[str, Any] = {
@@ -83,6 +105,10 @@ def export_engine_state(engine: "Engine") -> Dict[str, Any]:
             "seed": getattr(engine, "seed", 0),
             "last_selected_basename": getattr(engine, "last_selected_basename", None),
             "component_weights": getattr(engine, "component_weights", []),
+            "dim2loras": getattr(engine, "dim2loras", None),
+            "lora_merge_indices": list(getattr(engine, "lora_merge_indices", [])),
+            "lora_merge_weights": list(getattr(engine, "lora_merge_weights", [])),
+            "dim_index_per_lora": list(getattr(engine, "dim_index_per_lora", [])),
             "x_record": _dict_to_serializable(getattr(engine, "x_record", {})),
             "x_observations": {
                 "train_X": obs_train,
@@ -90,12 +116,11 @@ def export_engine_state(engine: "Engine") -> Dict[str, Any]:
             },
             "train_X": _tensor_to_list(getattr(engine, "train_X", None)),
             "Y": _tensor_to_list(getattr(engine, "Y", None)),
+            "train_dataset_history": train_history_payload,
+            "train_dataset_version": getattr(engine, "train_dataset_version", 0),
             "path": _tensor_to_list(getattr(engine, "path", [])),
-            "path_train_X": _tensor_to_list(getattr(engine, "path_train_X", None)),
-            "path_Y": _tensor_to_list(getattr(engine, "path_Y", None)),
             "num_warmup": getattr(engine, "num_warmup", 0),
             "MC_SAMPLES": getattr(engine, "MC_SAMPLES", 0),
-            "I": list(getattr(engine, "I", [])),
             "last_past_indices": list(getattr(engine, "last_past_indices", [])),
             "state_loaded": getattr(engine, "state_loaded", False),
             "ranking_history": history_payload,
@@ -130,12 +155,21 @@ def _to_tensor(data: Any, device: torch.device) -> torch.Tensor | None:
 
 def apply_engine_state(engine: "Engine", payload: Dict[str, Any], device: torch.device) -> None:
     engine_payload = payload.get("engine", {})
+    cpu_device = torch.device("cpu")
     engine.step = int(engine_payload.get("step", 0))
     engine.seed = int(engine_payload.get("seed", engine.seed))
     engine.last_selected_basename = engine_payload.get(
         "last_selected_basename")
     engine.component_weights = engine_payload.get(
         "component_weights", engine.component_weights)
+    if "dim2loras" in engine_payload and engine_payload.get("dim2loras") is not None:
+        engine.dim2loras = engine_payload.get("dim2loras")
+    if "lora_merge_indices" in engine_payload:
+        engine.lora_merge_indices = list(engine_payload.get("lora_merge_indices") or [])
+    if "lora_merge_weights" in engine_payload:
+        engine.lora_merge_weights = list(engine_payload.get("lora_merge_weights") or [])
+    if "dim_index_per_lora" in engine_payload:
+        engine.dim_index_per_lora = list(engine_payload.get("dim_index_per_lora") or [])
 
     engine.x_record = _dict_from_serialized(engine_payload.get("x_record", {}))
 
@@ -151,19 +185,34 @@ def apply_engine_state(engine: "Engine", payload: Dict[str, Any], device: torch.
     engine.train_X = _to_tensor(engine_payload.get("train_X"), device)
     engine.Y = _to_tensor(engine_payload.get("Y"), device)
 
+    engine.train_dataset_version = int(
+        engine_payload.get("train_dataset_version", getattr(engine, "train_dataset_version", 0)))
+    dataset_history_payload = engine_payload.get("train_dataset_history") or []
+    restored_history: list[Dict[str, Any]] = []
+    for snapshot_payload in dataset_history_payload:
+        if not isinstance(snapshot_payload, dict):
+            continue
+        restored_history.append({
+            "version": int(snapshot_payload.get("version", 0)),
+            "stage_index": int(snapshot_payload.get("stage_index", 0)),
+            "step": int(snapshot_payload.get("step", 0)),
+            "reason": snapshot_payload.get("reason"),
+            "train_X": _to_tensor(snapshot_payload.get("train_X"), cpu_device),
+            "Y": _to_tensor(snapshot_payload.get("Y"), cpu_device),
+            "lora_merge_indices": [int(i) for i in snapshot_payload.get("lora_merge_indices", [])],
+            "lora_merge_weights": [float(w) for w in snapshot_payload.get("lora_merge_weights", [])],
+            "dim_index_per_lora": [int(i) for i in snapshot_payload.get("dim_index_per_lora", [])],
+        })
+    engine.train_dataset_history = restored_history
+
     path_list = engine_payload.get("path") or []
     engine.path = [
         _to_tensor(item, device) if item is not None else None
         for item in path_list
     ]
 
-    engine.path_train_X = _to_tensor(
-        engine_payload.get("path_train_X"), device)
-    engine.path_Y = _to_tensor(engine_payload.get("path_Y"), device)
-
     engine.num_warmup = engine_payload.get("num_warmup", engine.num_warmup)
     engine.MC_SAMPLES = engine_payload.get("MC_SAMPLES", engine.MC_SAMPLES)
-    engine.I = list(engine_payload.get("I", engine.I))
     engine.last_past_indices = list(engine_payload.get(
         "last_past_indices", engine.last_past_indices))
     engine.ranking_history = list(engine_payload.get(
@@ -250,6 +299,10 @@ def export_slider_state(engine: "Engine") -> Dict[str, Any]:
         "seed": getattr(engine, "seed", 0),
         "last_selected_basename": getattr(engine, "last_selected_basename", None),
         "component_weights": getattr(engine, "component_weights", []),
+        "dim2loras": getattr(engine, "dim2loras", None),
+        "lora_merge_indices": list(getattr(engine, "lora_merge_indices", [])),
+        "lora_merge_weights": list(getattr(engine, "lora_merge_weights", [])),
+        "dim_index_per_lora": list(getattr(engine, "dim_index_per_lora", [])),
         "x_record": _dict_to_serializable(getattr(engine, "x_record", {})),
         "last_round_context": getattr(engine, "last_round_context", None),
         "stage_index": getattr(engine, "stage_index", 0),
@@ -298,6 +351,14 @@ def apply_slider_engine_state(engine: "Engine", payload: Dict[str, Any], device:
         engine.last_selected_basename = engine_payload.get("last_selected_basename")
     if "component_weights" in engine_payload:
         engine.component_weights = engine_payload.get("component_weights", [])
+    if "dim2loras" in engine_payload and engine_payload.get("dim2loras") is not None:
+        engine.dim2loras = engine_payload.get("dim2loras")
+    if "lora_merge_indices" in engine_payload:
+        engine.lora_merge_indices = list(engine_payload.get("lora_merge_indices") or [])
+    if "lora_merge_weights" in engine_payload:
+        engine.lora_merge_weights = list(engine_payload.get("lora_merge_weights") or [])
+    if "dim_index_per_lora" in engine_payload:
+        engine.dim_index_per_lora = list(engine_payload.get("dim_index_per_lora") or [])
 
     x_record_payload = engine_payload.get("x_record")
     if isinstance(x_record_payload, dict):

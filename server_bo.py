@@ -363,15 +363,37 @@ class Engine:
         self.x_observations = None
         self.train_X = None
         self.Y = None
+        
         self.path = []
-        self.path_train_X = None
-        self.path_Y = None
+
+        self.train_dataset_history: list[dict] = []
+        self.train_dataset_version: int = 0
+
         self.num_warmup = 0
         self.MC_SAMPLES = 0
-        self.I = []
         self.last_past_indices = []
         self.ranking_history: list[dict] = []
         self.last_round_context: dict | None = None
+
+    def _archive_current_train_dataset(self, reason: str | None = None) -> None:
+        """Persist the active train_X/Y tensors before rebuilding them."""
+        if self.train_X is None or self.Y is None:
+            return
+        snapshot = {
+            "version": int(self.train_dataset_version),
+            "stage_index": int(self.stage_index),
+            "step": int(self.step),
+            "reason": reason,
+            "train_X": self.train_X.detach().cpu().clone(),
+            "Y": self.Y.detach().cpu().clone(),
+            "lora_merge_indices": [int(i) for i in getattr(self, "lora_merge_indices", [])],
+            "lora_merge_weights": [float(w) for w in getattr(self, "lora_merge_weights", [])],
+            "dim_index_per_lora": [int(i) for i in getattr(self, "dim_index_per_lora", [])],
+        }
+        self.train_dataset_history.append(snapshot)
+
+    def _begin_new_train_dataset_version(self) -> None:
+        self.train_dataset_version += 1
 
     def is_stage_ready(self) -> bool:
         if not self.stage_boundaries:
@@ -736,8 +758,11 @@ class Engine:
 
         pl.seed_everything(self.seed)
 
+        self._archive_current_train_dataset(
+            reason=f"stage-{self.stage_index}-complete")
+        self._begin_new_train_dataset_version()
+
         self.stage_index += 1
-        self.step += 1
         self.cur_step = 0
         self.last_round_context = None
 
@@ -747,10 +772,17 @@ class Engine:
 
         self.dim2loras = self.construct_search_space()
         self.update_search_space(src_dir)
-        self.construct_init_samples()
+        seed_context = self.construct_init_samples(
+            capture_context=True,
+            context_iteration=int(self.step) + 1,
+        )
+
+        if seed_context:
+            self.last_round_context = seed_context
 
         pl.seed_everything(self.seed)
         self.save_state(reason=f'stage-{self.stage_index}')
+        
         return True
 
     def construct_search_space(self):
@@ -796,10 +828,12 @@ class Engine:
 
         return dim2loras
 
-    def construct_init_samples(self):
+    def construct_init_samples(self, *, capture_context: bool = False, context_iteration: int | None = None):
         inf_f = self.f_init if self.train_X is None else self.f
         self.x_observations, x_record = prepare_init_obs_simplex(self.num_observations, len(
             self.dim2loras), inf_f, seed=self.seed, sparse_threshold=0.1, sampler=sample_dirichlet_simplex)
+        seed_context: dict | None = None
+        context_iteration_value = context_iteration if context_iteration is not None else int(self.step)
 
         # Reuse the existing train_X and Y if available
         if self.train_X is not None and self.Y is not None:
@@ -839,23 +873,44 @@ class Engine:
 
             self.x_record = {}
 
-            async def _seed_initial_slots() -> None:
+            async def _seed_initial_slots() -> dict | None:
                 new_y = [0.0 for _ in range(init_observations2.shape[0])]
                 new_I = list(range(init_observations2.shape[0]))
                 round_id = int(time.time() * 1000)
-                iteration = int(self.step)
+                iteration = int(context_iteration_value)
                 if self.gpu_pool:
                     if not self._pool_warmed:
                         self._warmup_gpu_pool()
                     await self._generate_with_pool(init_observations2, new_I, new_y, round_id, iteration, emit_events=False)
                 else:
                     await self._generate_in_process(init_observations2, new_I, new_y, round_id, iteration, emit_events=False)
+                return {
+                    "round": int(round_id),
+                    "n": int(init_observations2.shape[0]),
+                    "iteration": int(iteration),
+                    "new_x": init_observations2.detach().cpu().tolist(),
+                    "new_I": [int(i) for i in new_I],
+                    "new_y": [float(val) for val in new_y],
+                }
 
-            asyncio.run(_seed_initial_slots())
+            seed_context = asyncio.run(_seed_initial_slots())
 
             print(f'In construct_init_samples: {self.x_record}')
         else:
             self.x_record = x_record
+        if capture_context and seed_context:
+            seed_context.setdefault("ranking", [])
+            seed_context.setdefault("timestamp", time.time())
+            seed_context.setdefault("step", int(self.step))
+            seed_context.setdefault("stage_seed", True)
+        else:
+            seed_context = None if not capture_context else seed_context
+            
+        train_X, Y = self.x_observations
+        self.train_X = torch.from_numpy(train_X).double().to(device)
+        self.Y = torch.from_numpy(Y).double().to(device)
+            
+        return seed_context
 
     def update_search_space(self, init_src_dir):
         lora2canon_dim = {
@@ -1077,15 +1132,9 @@ class Engine:
         # --- init / feedback ---
         if self.cur_step == 0:
             train_X, Y = self.x_observations
-            self.train_X = torch.from_numpy(train_X).double().to(device)
-            self.Y = torch.from_numpy(Y).double().to(device)
 
             self.num_warmup = train_X.shape[0]
             self.MC_SAMPLES = 256
-            self.path_train_X = self.train_X.clone()
-            self.path_Y = self.Y.clone()
-            self.path = []
-            self.I = [0 for _ in range(self.train_X.shape[0])]
 
             self.last_past_indices = []
 
@@ -1150,6 +1199,7 @@ class Engine:
             "indices": [int(x) for x in ranked_indices],
             "selected": self.last_selected_basename,
             "saved_at": time.time(),
+            "train_version": int(self.train_dataset_version),
         })
 
         ctx_new_x = new_x.detach().cpu().tolist()

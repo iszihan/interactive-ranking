@@ -22,6 +22,7 @@ const defaultStageState = {
   currentStage: 1,
   totalStages: 1,
   iterations: [],
+  step: null,
 };
 let stageState = { ...defaultStageState };
 let isGenerationInFlight = false;
@@ -46,11 +47,16 @@ function normalizeStagePayload(stage) {
   if ((normalized.nextStageNumber === null || normalized.nextStageNumber === undefined) && normalized.hasStages) {
     normalized.nextStageNumber = normalized.currentStage + 1;
   }
+  const stepValue = Number(stage.step ?? normalized.step);
+  normalized.step = Number.isFinite(stepValue) ? stepValue : null;
   return normalized;
 }
 
 function applyStagePayload(stage) {
   stageState = normalizeStagePayload(stage);
+  if (currentIteration !== null && Number.isFinite(stageState.step)) {
+    setIterationDisplay(stageState.step);
+  }
   updateActionButtons();
 }
 
