@@ -383,6 +383,7 @@ class Engine:
         return {
             "state": state,
             "x": x_vector.tolist(),
+            "w": x_vector.tolist(),
         }
 
     def _warmup_gpu_pool(self) -> None:
