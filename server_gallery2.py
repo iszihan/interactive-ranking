@@ -449,11 +449,12 @@ class Engine:
             print(f"Failed to load engine state from {target}: {exc}")
             return False
 
-    def _build_worker_payload(self, x_vector: np.ndarray) -> dict:
+    def _build_worker_payload(self, x_vector: np.ndarray, x_pysps_vector: np.ndarray) -> dict:
         state = copy.deepcopy(self.worker_state_template or {})
         return {
             "state": state,
             "x": x_vector.tolist(),
+            "x_pysps": x_pysps_vector.tolist(),
             "w": x_vector.tolist(),
         }
         
@@ -476,7 +477,7 @@ class Engine:
             base_weights_gpu = np.clip(base_weights_gpu, 0, 1)
             base_weights_gpu = base_weights_gpu / np.sum(base_weights_gpu)
 
-            payload = self._build_worker_payload(base_weights_gpu)
+            payload = self._build_worker_payload(base_weights_gpu, base_weights_gpu)
             payload["state"]["output_dir"] = str(warm_dir)
             job_id = self.gpu_pool.submit(
                 "worker_make_generation", {"payload": payload})
@@ -497,7 +498,7 @@ class Engine:
 
         self._pool_warmed = True
 
-    async def _finalize_slot(self, slot_idx: int, idx: int, data: bytes, x_vector: np.ndarray, round_id: int, iteration: int):
+    async def _finalize_slot(self, slot_idx: int, idx: int, data: bytes, x_vector: np.ndarray, x_pysps_vector: np.ndarray, round_id: int, iteration: int):
         out_path = SLOTS_DIR / f"slot-{slot_idx}.png"
         await asyncio.to_thread(out_path.write_bytes, data)
         await self._events.put(("slot", {
@@ -506,15 +507,19 @@ class Engine:
             "iteration": int(iteration),
         }))
         self.x_record[out_path.name] = (x_vector, int(idx))
+        self.x_record_pysps[out_path.name] = (x_pysps_vector, int(idx))
 
-    async def _generate_with_pool(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int):
+    async def _generate_with_pool(self, new_x: torch.Tensor, new_x_original: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int):
         pending: dict[int, tuple[int, int]] = {}
         for i in range(new_x.shape[0]):
             x_trial = new_x[i]
+            x_trial_original = new_x_original[i]
             if isinstance(x_trial, torch.Tensor):
                 x_trial = x_trial.detach().cpu().numpy()
+            if isinstance(x_trial_original, torch.Tensor):
+                x_trial_original = x_trial_original.detach().cpu().numpy()
             idx = new_I[i]
-            payload = self._build_worker_payload(x_trial)
+            payload = self._build_worker_payload(x_trial, x_trial_original)
             job_id = self.gpu_pool.submit(
                 "worker_make_generation", {"payload": payload})
             pending[job_id] = (i, idx)
@@ -528,18 +533,23 @@ class Engine:
             if isinstance(data, memoryview):
                 data = data.tobytes()
             x_vec = np.array(result["x"], dtype=np.float64)
+            x_pysps_vec = np.array(result["x_pysps"], dtype=np.float64)
             new_y[slot_idx] = float(result["sim_val"])
-            await self._finalize_slot(slot_idx, idx, data, x_vec, round_id, iteration)
+            await self._finalize_slot(slot_idx, idx, data, x_vec, x_pysps_vec, round_id, iteration)
 
-    async def _generate_in_process(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int):
+    async def _generate_in_process(self, new_x: torch.Tensor, new_x_original: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int):
         for i in range(new_x.shape[0]):
             x_trial = new_x[i]
+            x_trial_original = new_x_original[i]
             if isinstance(x_trial, torch.Tensor):
                 x_trial = x_trial.detach().cpu().numpy()
+            if isinstance(x_trial_original, torch.Tensor):
+                x_trial_original = x_trial_original.detach().cpu().numpy()
             idx = new_I[i]
             data, x_vec, y = await asyncio.to_thread(_make_generation, self, x_trial)
             new_y[i] = float(np.asarray(y).flatten()[0])
-            await self._finalize_slot(i, idx, data, x_vec, round_id, iteration)
+            x_pysps_vec = x_trial_original if isinstance(x_trial_original, np.ndarray) else np.array(x_trial_original, dtype=np.float64)
+            await self._finalize_slot(i, idx, data, x_vec, x_pysps_vec, round_id, iteration)
 
     async def recall_last_round(self, *, emit_events: bool = False) -> bool:
         ctx = self.last_round_context or {}
@@ -686,14 +696,14 @@ class Engine:
         self.pysps_num_candidates = 3 # TODO: add this as a config var 
         self.pysps_radius = int((self.pysps_num_candidates - 1) / 2)
         self.pysps_x_range = [0.0, 1.0]
-        plane = self.pysps_optimizer.retrieve_search_plane()
-        x_center = plane.get_center()
+        self.plane = self.pysps_optimizer.retrieve_search_plane()
+        x_center = self.plane.get_center()
         X = []
         X_original = []
         for i in range(self.pysps_num_candidates):
             for j in range(self.pysps_num_candidates):
                 cell_index = (i - self.pysps_radius, j - self.pysps_radius)
-                x = plane.calc_grid_parameters(cell_index, self.pysps_num_candidates, 0.5, [])
+                x = self.plane.calc_grid_parameters(cell_index, self.pysps_num_candidates, 0.5, [])
                 x_original = x.copy()
                 
                 x = ( x + 1.0 ) / 2.0 # normalize to [0, 1] 
@@ -868,17 +878,31 @@ class Engine:
 
     async def next(
         self,
-        ranking_basenames: list[str],
+        selection_basenames: list[str],
         round_id: int | None = None,
         limit: int | None = None,
     ) -> None:
-        # pick the user's top choice
-        self.last_selected_basename = ranking_basenames[0]
+        
+        # Pick the user's chosen image (first entry of selection list)
+        self.last_selected_basename = selection_basenames[0]
         img_name = Path(self.last_selected_basename).name
-        print('X record:', self.x_record)
-        assert img_name in self.x_record, f"Image {img_name} not found in record."
-
+        # print('X record:', self.x_record)
+        assert img_name in self.x_record_pysps, f"Image {img_name} not found in record."
+        print(img_name)
+        
+        # submit user's choice for pysps optimizer 
+        x_selected_original = self.x_record_pysps[img_name][0]
+        self.pysps_optimizer.submit_data(x_selected_original, self.plane.get_vertices())
+        
+        # Add the current selecton to path
+        selected_x = self.x_record_pysps[img_name][0]
+        if isinstance(selected_x, np.ndarray):
+            selected_x = torch.from_numpy(selected_x).double().to(device)
+        self.path.append(selected_x)
+        
         self.clear_outputs()
+        
+        # retrieve the next search plane based on user feedback 
 
         # --- init / feedback ---
         if self.step == 0:
@@ -900,45 +924,40 @@ class Engine:
         print(f'self.train_X: {self.train_X}')
 
         ranked_indices = [
-            self.x_record[Path(img_name).name][1] for img_name in ranking_basenames]
-        comp_pairs = ranking2pairs(ranked_indices)
+            self.x_record[Path(img_name).name][1] for img_name in selection_basenames]
         print(f'ranked_indices: {ranked_indices}')
+        
+        # retrieve the next x on next search plane 
+        self.plane = self.pysps_optimizer.retrieve_search_plane()
+        x_center = self.plane.get_center()
+        new_X = []
+        new_X_original = []
+        for i in range(self.pysps_num_candidates):
+            for j in range(self.pysps_num_candidates):
+                cell_index = (i - self.pysps_radius, j - self.pysps_radius)
+                x = self.plane.calc_grid_parameters(cell_index, self.pysps_num_candidates, 0.5, [])
+                x_original = x.copy()
+                x = ( x + 1.0 ) / 2.0 # normalize to [0, 1] 
+                # Check if any element of x is outside [0, 1]
+                if x.min() < self.pysps_x_range[0] or x.max() > self.pysps_x_range[1]:
+                    x_0 = x.copy()  
+                    # Make sure x is within the hyper-cube
+                    direction = x - x_center
+                    direction = direction / np.linalg.norm(direction)
+                    _, lambda_high = ray_box_steps(
+                        x_center, direction, low=0.0, high=1.0)
+                    
+                    x = x_center + lambda_high * direction
 
-        comp_pairs = torch.tensor(comp_pairs, dtype=torch.long).to(device)
-        pairwise_gp = fit_gpytorch_pair_model(self.train_X, comp_pairs)
-        gp, latent_Y = pairwise_to_single_task(
-            self.train_X, self.Y, pairwise_gp)
-
-        print(f'ranked_indices: {ranked_indices}')
-
-        print('Acquiring GP...')
-        new_x = self.acquire(gp)
-        print(f'Acquired new_x: {new_x}')
-
-        # Estimate the latent Y values for new_x
-        pairwise_gp.eval()
-        with torch.no_grad():
-            # a MultivariateNormal
-            post = pairwise_gp.posterior(new_x)
-            new_latent_Y = post.mean.squeeze(-1).unsqueeze(-1)  # shape (n,1)
-        # Sort new_x based on estimated latent Y values (higher is better)
-        # descending order
-        ranked_new_indices = torch.argsort(-new_latent_Y, dim=0)
-        ranked_new_indices = ranked_new_indices.flatten()
-        new_x = new_x[ranked_new_indices]
-
-        # Add new_x to train_X
-        new_I = [ranked_indices[0]] + \
-            [self.train_X.shape[0] + i for i in range(new_x.shape[0])]
-        self.train_X = torch.cat([self.train_X, new_x], dim=0)
-
-        # Add the current best to the beginning of new_x
-        selected_x = self.x_record[img_name][0]
-        if isinstance(selected_x, np.ndarray):
-            selected_x = torch.from_numpy(selected_x).double().to(device)
-        new_x = torch.vstack([selected_x, new_x])
-
-        self.path.append(selected_x)
+                    # Clip to [0, 1]
+                    x = np.clip(x, 0.0, 1.0)
+                    print(f'Clipping x: {x_0} to {x}')
+                new_X.append(x)
+                new_X_original.append(x_original)
+                
+        new_x = torch.tensor(np.array(new_X), dtype=torch.double).to(device)
+        new_x_original = torch.tensor(np.array(new_X_original), dtype=torch.double).to(device)
+        new_I = [self.train_X.shape[0] + i for i in range(self.pysps_num_candidates**2)]
 
         # --- slider setup ---
         n = min(limit or self.num_observations_per_step + 1,
@@ -954,7 +973,7 @@ class Engine:
         self.ranking_history.append({
             "step": int(self.step),
             "round": int(round_id),
-            "ranking": list(ranking_basenames),
+            "ranking": list(selection_basenames),  # keep field name for backward compat
             "indices": [int(x) for x in ranked_indices],
             "selected": self.last_selected_basename,
             "saved_at": time.time(),
@@ -967,7 +986,7 @@ class Engine:
             "n": int(n),
             "new_x": ctx_new_x,
             "new_I": [int(i) for i in new_I],
-            "ranking": list(ranking_basenames),
+            "selection": list(selection_basenames),
             "timestamp": time.time(),
             "iteration": int(iteration),
         }
@@ -982,9 +1001,9 @@ class Engine:
         # Iterate and generate each slot given new_x
         new_y = [0 for _ in range(new_x.shape[0])]
         if self.gpu_pool:
-            await self._generate_with_pool(new_x, new_I, new_y, round_id, iteration)
+            await self._generate_with_pool(new_x, new_x_original, new_I, new_y, round_id, iteration)
         else:
-            await self._generate_in_process(new_x, new_I, new_y, round_id, iteration)
+            await self._generate_in_process(new_x, new_x_original, new_I, new_y, round_id, iteration)
         new_y_results = list(new_y)
         if self.last_round_context is not None:
             self.last_round_context["new_y"] = [float(val) for val in new_y_results]
@@ -1012,7 +1031,7 @@ def _require_engine() -> Engine:
     return engine
 
 
-app.mount("/static", StaticFiles(directory="."), name="static")
+app.mount("/static", StaticFiles(directory="gallery"), name="static")
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 app.mount("/slots", StaticFiles(directory=str(SLOTS_DIR)), name="slots")
 
@@ -1301,4 +1320,4 @@ if __name__ == "__main__":
 
     _register_shutdown_handlers()
     # uvicorn.run("server_bo:app", host="127.0.0.1", port=8000, reload=True)
-    uvicorn.run("server_gallery2:app", host="0.0.0.0", port=8001, reload=True)
+    uvicorn.run("server_gallery2:app", host="0.0.0.0", port=8000, reload=True)

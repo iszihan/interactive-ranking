@@ -233,9 +233,9 @@ body{
 }
 
 .brick.selected{
-  outline: 3px solid #2684FF;
-  outline-offset: -3px;
-  box-shadow: 0 6px 16px rgba(38,132,255,0.25);
+  outline: 4px solid #f57c00;
+  outline-offset: -2px;
+  box-shadow: 0 8px 18px rgba(245,124,0,0.35);
 }
 
 /* image fills the box once loaded */

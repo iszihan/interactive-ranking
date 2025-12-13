@@ -88,15 +88,8 @@ if (rankSection) rankSection.classList.add("hidden");
 if (referenceSection) referenceSection.classList.add("hidden");
 if (iterationIndicator) iterationIndicator.classList.add("hidden");
 
-// ---------- drag-to-reorder ----------
-let draggingElem = null;
-let startX = 0;
-let startIndex = 0;
-let currentIndex = 0;
-let lastInteractionWasDrag = false;
+// ---------- selection (no drag ranking) ----------
 let selectedBrick = null;
-const DRAG_THRESHOLD_PX = 5;
-
 const SLOTS_BASE = "/slots"; // make sure this matches server
 
 function setIterationDisplay(value, { commit = true } = {}) {
@@ -132,99 +125,13 @@ function updateReferenceImage(src) {
 function indexOfElement(el) { return [...container.children].indexOf(el); }
 function getClientX(e) { return e.touches ? e.touches[0].clientX : e.clientX; }
 
-function onMouseDown(e) {
+function onBrickClick(e) {
   const brick = e.target.closest(".brick");
   if (!brick) return;
-  e.preventDefault();
-  lastInteractionWasDrag = false;
-
-  draggingElem = brick;
-  startX = getClientX(e);
-  startIndex = indexOfElement(draggingElem);
-  currentIndex = startIndex;
-
-  draggingElem.classList.add("dragging");
-  document.addEventListener("mousemove", onMouseMove);
-  document.addEventListener("mouseup", onMouseUp);
-  document.addEventListener("touchmove", onMouseMove, { passive: false });
-  document.addEventListener("touchend", onMouseUp);
+  showZoomForBrick(brick);
 }
-container.addEventListener("mousedown", onMouseDown);
-container.addEventListener("touchstart", onMouseDown, { passive: false });
-
-function onMouseMove(e) {
-  e.preventDefault();
-  if (!draggingElem) return;
-
-  const deltaX = getClientX(e) - startX;
-  if (!lastInteractionWasDrag && Math.abs(deltaX) > DRAG_THRESHOLD_PX) {
-    lastInteractionWasDrag = true;
-  }
-  draggingElem.style.transform = `translateX(${deltaX}px)`;
-
-  const all = [...container.children];
-  const others = all.filter(el => el !== draggingElem);
-
-  function middle(el) { const r = el.getBoundingClientRect(); return r.left + r.width / 2; }
-  const midX = middle(draggingElem);
-
-  let newIndex = others.findIndex(other => midX < middle(other));
-  if (newIndex === -1) newIndex = others.length;
-
-  if (newIndex !== currentIndex) {
-    currentIndex = newIndex;
-    reorderGhosts();
-  }
-}
-
-function reorderGhosts() {
-  const bricks = [...container.children].filter(el => el !== draggingElem);
-  const spacing = draggingElem.getBoundingClientRect().width;
-  const cs = getComputedStyle(container);
-  const gap = parseFloat(cs.columnGap || cs.getPropertyValue?.("column-gap") || cs.gap || "0") || 0;
-  const offset = spacing + gap;
-
-  bricks.forEach((b, i) => {
-    b.style.transform = "";
-    if (startIndex < currentIndex && i >= startIndex && i < currentIndex) {
-      b.style.transform = `translateX(-${offset}px)`;
-    } else if (startIndex > currentIndex && i >= currentIndex && i < startIndex) {
-      b.style.transform = `translateX(${offset}px)`;
-    }
-  });
-}
-
-function onMouseUp() {
-  if (!draggingElem) return;
-
-  const droppedBrick = draggingElem;
-  const wasDrag = lastInteractionWasDrag;
-  const bricks = [...container.children].filter(el => el !== draggingElem);
-  bricks.forEach(b => { b.style.transform = ""; b.classList.add("resetting"); });
-
-  draggingElem.style.transform = "";
-  draggingElem.classList.remove("dragging");
-
-  const referenceNode = bricks[currentIndex] ?? null;
-  container.insertBefore(draggingElem, referenceNode);
-
-  draggingElem = null;
-  document.removeEventListener("mousemove", onMouseMove);
-  document.removeEventListener("mouseup", onMouseUp);
-  document.removeEventListener("touchmove", onMouseMove);
-  document.removeEventListener("touchend", onMouseUp);
-
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      bricks.forEach(b => b.classList.remove("resetting"));
-    });
-  });
-
-  if (!wasDrag) {
-    showZoomForBrick(droppedBrick);
-  }
-
-  lastInteractionWasDrag = false;
+if (container) {
+  container.addEventListener("click", onBrickClick);
 }
 
 function clearZoomSelection() {
@@ -255,7 +162,7 @@ function showZoomForBrick(brick) {
   zoomSection.classList.remove("hidden");
 }
 
-// selection happens on mouse/touch release (see onMouseUp)
+// selection happens on click
 
 // ---------- layout helpers ----------
 function setTilesPerRow(N) {
@@ -302,9 +209,9 @@ if (startBtn) startBtn.addEventListener("click", startProcess);
 function renderPlaceholders(n) {
   container.innerHTML = "";
   clearZoomSelection();
-  container.style.display = "flex";
-  container.style.gap = "12px";
-  container.style.overflowX = "auto";
+  container.style.display = "grid";
+  container.style.gap = "16px";
+  container.style.overflow = "visible";
 
   for (let i = 0; i < n; i++) {
     const brick = document.createElement("div");
@@ -332,11 +239,9 @@ function renderImageList(images) {
 
   container.innerHTML = "";
   clearZoomSelection();
-  container.style.display = "flex";
-  container.style.flexDirection = "row";
-  container.style.flexWrap = "nowrap";
-  container.style.gap = "12px";
-  container.style.overflowX = "auto";
+  container.style.display = "grid";
+  container.style.gap = "16px";
+  container.style.overflow = "visible";
 
   for (const src of list) {
     const div = document.createElement("div");
@@ -482,15 +387,10 @@ async function refreshStageStatus() {
 refreshStageStatus();
 
 // ---------- ranking ----------
-function getRanking() {
-  const order = [...container.querySelectorAll(".brick img")].map(img =>
-    img.dataset.basename ||
-    new URL(img.src, location.href).pathname.split("/").pop()
-  ).filter(Boolean);
-
-  // sanity check
-  console.log("ranking to send:", order);
-  return order;
+function getSelection() {
+  const img = selectedBrick?.querySelector("img");
+  if (!img) return null;
+  return img.dataset.src || img.src || null;
 }
 
 // ---------- Next button ----------
@@ -502,7 +402,11 @@ if (nextBtn) {
       updateActionButtons();
       return;
     }
-    const order = getRanking();
+    const selection = getSelection();
+    if (!selection) {
+      statusEl.textContent = "Please select an image.";
+      return;
+    }
     isGenerationInFlight = true;
     updateActionButtons();
     statusEl.textContent = "Starting…";
@@ -511,7 +415,7 @@ if (nextBtn) {
     setIterationDisplay(previewIteration, { commit: false });
 
     // show skeleton now (guess N from current tiles or default)
-    const nGuess = container.querySelectorAll(".brick").length || 6;
+    const nGuess = 9;
     renderPlaceholders(nGuess);
     setTilesPerRow(nGuess);
 
@@ -519,7 +423,7 @@ if (nextBtn) {
       const resp = await fetch("/api/next", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ranking: order })
+        body: JSON.stringify({ selection, n: nGuess })
       });
       if (!resp.ok) {
         throw new Error("Next failed.");

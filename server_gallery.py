@@ -30,6 +30,8 @@ import numpy as np
 import uvicorn
 from diffusers.utils import load_image
 import pySequentialLineSearch
+import pysps
+
 sys.path.append('/scratch/ondemand29/chenxil/code/mood-board')
 from helper.infer import infer
 from helper.sampler import sample_dirichlet_simplex
@@ -39,20 +41,10 @@ from search_benchmark.comparison_solvers import fit_gpytorch_pair_model, pairwis
 from engine import (obj_sim, infer_image_img2img,
                     prepare_init_obs, prepare_init_obs_simplex, infer_image)
 
-from botorch.acquisition import (
-    qUpperConfidenceBound)
-from botorch.sampling.normal import SobolQMCNormalSampler
-from botorch.optim import optimize_acqf
-from botorch.optim.optimize import gen_batch_initial_conditions
-from search_benchmark.acq_prior import (
-    qSimplexUpperConfidenceBound,
-    stick_breaking_transform, inverse_stick_breaking_transform
-)
-from helper.sampler import qmc_simplex_generator, get_mcmc_from_cache
 from async_multi_gpu_pool import MultiGPUInferPool
 from serialize import export_engine_state, apply_engine_state, save_engine_state, load_engine_state
 
-CONFIG_FILE = Path(__file__).parent.resolve() / "config.yml"
+CONFIG_FILE = Path(__file__).parent.resolve() / "config_gallery.yml"
 
 FRONTEND_DIR = Path(__file__).parent.resolve()
 OUTPUT_DIR = FRONTEND_DIR / "outputs"
@@ -92,6 +84,23 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # helpers ------------------------------------------------------------
 
+def ray_box_steps(p, v, low=0.0, high=1.0):
+    p = np.asarray(p, dtype=float).flatten()
+    v = np.asarray(v, dtype=float).flatten()
+    # print(f'p: {p.shape}, v: {v.shape}, low: {low}, high: {high}')
+    assert p.shape == v.shape
+
+    # Steps for +v
+    t_to_high = np.where(v > 0, (high - p) / v, np.inf)
+    t_to_low = np.where(v < 0, (low - p) / v,  np.inf)
+    t_plus = np.minimum(t_to_high, t_to_low).min()
+
+    # Steps for -v
+    t_to_high_m = np.where(v < 0, (high - p) / (-v), np.inf)
+    t_to_low_m = np.where(v > 0, (p - low) / v,    np.inf)
+    t_minus = np.minimum(t_to_high_m, t_to_low_m).min()
+
+    return float(-t_minus), float(t_plus)
 
 @app.on_event("startup")
 async def _init_engine_once():
@@ -156,12 +165,10 @@ class Engine:
         print(f"Outputs dir: {self.outputs_dir}")
 
         self.config_path = Path(config_path).resolve()
-        self.config_snapshot: dict | None = None
         self.state_path: Path | None = None
         self.save_state_path: Path | None = None
         self.autosave_enabled = True
         self.autoload_state = True
-        self.state_loaded = False
 
         self.step: int = 0
         self.cur_step: int = 0
@@ -179,7 +186,6 @@ class Engine:
             config = yaml.safe_load(f) or {}
         if not isinstance(config, dict):
             raise ValueError("Config file must be a mapping.")
-        self.config_snapshot = copy.deepcopy(config)
 
         self.autosave_enabled = bool(config.get('autosave_enabled', True))
         self.autoload_state = bool(config.get('autoload_state', True))
@@ -197,6 +203,7 @@ class Engine:
             print(f"Engine save state path: {self.save_state_path}")
 
         self.num_observations = config.get('num_observations', 10)
+        self.num_candidates = config.get('num_candidates', 3)
         self.init_dir = config.get('init_dir', None)
         self.seed = config.get('seed', 0)
         self.gt_config = config.get('gt_config', '')
@@ -209,41 +216,6 @@ class Engine:
         self.infer_steps = config.get('infer_steps', 30)
         self.num_observations_per_step = config.get(
             'num_observations_per_step', 5)
-
-        # Stage iterations
-        raw_stage_iterations = config.get('stage_iterations', [])
-        if isinstance(raw_stage_iterations, list):
-            cleaned_stage_iterations: list[int] = []
-            for value in raw_stage_iterations:
-                try:
-                    int_value = int(value)
-                except (TypeError, ValueError):
-                    continue
-                if int_value > 0:
-                    cleaned_stage_iterations.append(int_value)
-            self.stage_iterations = cleaned_stage_iterations
-        else:
-            self.stage_iterations = []
-        self.stage_boundaries = list(
-            accumulate(self.stage_iterations)) if self.stage_iterations else []
-        self.stage_index: int = 0
-
-        self.target_dim = config.get('target_dim', 8)
-        self.sample_past = config.get('sample_past', 2)
-        self.beta = config.get('beta', 9)
-
-        alpha_config = config.get('alpha_config', None)
-        self.alpha_config_base = None
-        if alpha_config:
-            try:
-                with open(alpha_config, 'r') as f_cfg:
-                    alpha_raw = yaml.safe_load(f_cfg) or {}
-            except Exception as exc:
-                print(f"Failed to load alpha_config {alpha_config}: {exc}")
-                alpha_raw = None
-            if isinstance(alpha_raw, dict):
-                self.alpha_config_base = alpha_raw.get(
-                    'alpha_search', alpha_raw)
 
         # Support for multi-GPU inference
         # gpu_ids: 0,1
@@ -265,25 +237,6 @@ class Engine:
             comp, weight = component.split(':')
             self.component_weights.append(
                 [comp.strip(), float(weight.strip())])
-
-        self.alpha_context = None
-        if self.alpha_config_base:
-            self.alpha_context = copy.deepcopy(self.alpha_config_base)
-            cache_dir_override = self.alpha_context.get(
-                'cache_dir') or 'alpha_cache'
-            cache_dir_resolved = str(
-                Path(str(cache_dir_override)).expanduser())
-            os.makedirs(cache_dir_resolved, exist_ok=True)
-            self.alpha_context['cache_dir'] = cache_dir_resolved
-            lora_meta = self.alpha_context.setdefault('loras', {})
-            for comp in self.component_weights:
-                comp_path = comp[0]
-                lora_id = Path(comp_path).stem
-                meta = lora_meta.setdefault(lora_id, {})
-                meta.setdefault('path', str(comp_path))
-                if 'image_dir' not in meta:
-                    meta['image_dir'] = str(
-                        Path(comp_path).with_suffix(''))
 
         control_img_path = WORKING_DIR / 'control.png'
         if not control_img_path.exists():
@@ -334,9 +287,13 @@ class Engine:
         else:
             self.gt_img = load_image(self.gt_image_path)  # .to(device)
             print(f"Loaded GT image from {self.gt_image_path}")
+            
+        def f(x): return obj_sim(self.gt_image_path, self.component_weights, x, weight_idx=1,
+                                 infer_image_func=self.infer_img_func,
+                                 output_dir=OUTPUT_DIR, to_vis=True, is_init=False, control_img=self.control_img)
 
+        self.f = f
         self.worker_state_template = self._make_worker_state_template()
-        self.clear_outputs()
 
     def infer_img_func(self, component_weights, image_path=None, control_img=None):
         return infer_image_img2img(component_weights,
@@ -376,71 +333,6 @@ class Engine:
         self.ranking_history: list[dict] = []
         self.last_round_context: dict | None = None
 
-    def _archive_current_train_dataset(self, reason: str | None = None) -> None:
-        """Persist the active train_X/Y tensors before rebuilding them."""
-        if self.train_X is None or self.Y is None:
-            return
-        snapshot = {
-            "version": int(self.train_dataset_version),
-            "stage_index": int(self.stage_index),
-            "step": int(self.step),
-            "reason": reason,
-            "train_X": self.train_X.detach().cpu().clone(),
-            "Y": self.Y.detach().cpu().clone(),
-            "lora_merge_indices": [int(i) for i in getattr(self, "lora_merge_indices", [])],
-            "lora_merge_weights": [float(w) for w in getattr(self, "lora_merge_weights", [])],
-            "dim_index_per_lora": [int(i) for i in getattr(self, "dim_index_per_lora", [])],
-        }
-        self.train_dataset_history.append(snapshot)
-
-    def _begin_new_train_dataset_version(self) -> None:
-        self.train_dataset_version += 1
-
-    def is_stage_ready(self) -> bool:
-        if not self.stage_boundaries:
-            return False
-        if self.stage_index < 0:
-            return False
-        if self.stage_index >= len(self.stage_boundaries):
-            return False
-        target_step = self.stage_boundaries[self.stage_index]
-        return int(self.step) >= int(target_step)
-
-    def stage_status(self) -> dict:
-        boundaries = list(self.stage_boundaries)
-        has_stages = bool(boundaries)
-        total_stages = len(boundaries) + 1 if has_stages else 1
-        clamped_index = max(0, min(self.stage_index, len(boundaries)))
-        current_stage = clamped_index + 1
-        ready = bool(
-            has_stages and clamped_index < len(boundaries) and int(self.step) >= int(boundaries[clamped_index]))
-        next_stage_number = current_stage + \
-            1 if clamped_index < len(boundaries) else None
-        next_stage_step = boundaries[clamped_index] if clamped_index < len(
-            boundaries) else None
-        remaining = None
-        if next_stage_step is not None:
-            remaining = max(0, int(next_stage_step) - int(self.step))
-        return {
-            "iterations": list(self.stage_iterations),
-            "boundaries": boundaries,
-            "currentStage": int(current_stage),
-            "totalStages": int(total_stages),
-            "nextStageReady": bool(ready),
-            "nextStageNumber": int(next_stage_number) if next_stage_number is not None else None,
-            "nextStageStep": int(next_stage_step) if next_stage_step is not None else None,
-            "remainingInStage": int(remaining) if remaining is not None else None,
-            "stageIndex": int(clamped_index),
-            "step": int(self.step),
-            "hasStages": has_stages,
-        }
-
-    async def emit_stage_update(self) -> None:
-        await self._events.put(("stage", {
-            "stage": self.stage_status(),
-            "images": _list_image_urls(),
-        }))
-
     def _make_worker_state_template(self) -> dict:
         return {
             "gt_image_path": self.gt_image_path,
@@ -454,60 +346,7 @@ class Engine:
             "control_img_path": self.control_img_path,
             "weight_idx": 1,
         }
-
-    def save_state(self, reason: str | None = None, path: Path | str | None = None, *, force: bool = False) -> Path | None:
-        target = path or self.save_state_path
-        if target is None:
-            print("No save-state path configured; skipping save.")
-            return None
-        target = Path(target)
-        if not force and not self.autosave_enabled and self.save_state_path and target == self.save_state_path:
-            print("Autosave disabled; skipping save.")
-            return None
-        try:
-            saved_path = save_engine_state(self, target, reason=reason)
-            print(
-                f"Saved engine state to {saved_path} ({reason or 'unspecified'})")
-            return saved_path
-        except Exception as exc:
-            print(f"Failed to save engine state to {target}: {exc}")
-            return None
-
-    def load_state(self, path: Path | str | None = None, *, reset: bool = False, force: bool = False) -> bool:
-        target = path or self.state_path
-        if target is None:
-            print("No state path configured; skipping load.")
-            return False
-        target = Path(target)
-        if not target.exists():
-            print(f"State file {target} does not exist.")
-            return False
-        if reset:
-            self._reset_runtime_state()
-        if not force and not self.autoload_state and target == self.state_path:
-            print("Autoload disabled; skipping load.")
-            return False
-        try:
-            payload = load_engine_state(target)
-            saved_meta = payload.get("metadata", {}) if isinstance(
-                payload, dict) else {}
-            saved_config = saved_meta.get("config_path")
-            if saved_config:
-                try:
-                    saved_path = Path(saved_config).resolve()
-                    if saved_path != self.config_path:
-                        print(
-                            f"Warning: loading state from {saved_path} while current config is {self.config_path}"
-                        )
-                except Exception:
-                    pass
-            apply_engine_state(self, payload, torch.device(device))
-            print(f"Loaded engine state from {target}")
-            return True
-        except Exception as exc:
-            print(f"Failed to load engine state from {target}: {exc}")
-            return False
-
+    
     def _build_worker_payload(self, x_vector: np.ndarray) -> dict:
         lora_dim = len(self.component_weights)
         w_full = np.zeros(lora_dim)
@@ -689,8 +528,10 @@ class Engine:
                 pass
         print("Cleared outputs.")
 
-    def start(self) -> None:
+    async def start(self) -> None:
+        """Initialize the engine and generate the first 3x3 grid."""
         pl.seed_everything(self.seed)
+        pysps.set_seed(self.seed)
 
         self.step = 0
         self.cur_step = 0
@@ -701,17 +542,15 @@ class Engine:
         if self.autoload_state:
             restored = self.load_state()
 
-        # Initialize mcmc cache regardless of restore state
-        get_mcmc_from_cache()
-
         self.clear_outputs()
 
         if restored:
             print(f"Restored engine state from {self.state_path}")
-            self._warmup_gpu_pool()
+            if self.gpu_pool and not self._pool_warmed:
+                await asyncio.to_thread(self._warmup_gpu_pool)
             if self.last_round_context:
                 try:
-                    asyncio.run(self.recall_last_round())
+                    await self.recall_last_round()
                 except Exception as exc:
                     print(f"Failed to recall last round during start: {exc}")
             else:
@@ -723,10 +562,19 @@ class Engine:
             src_dir = Path(self.init_dir)
         else:
             src_dir = WORKING_DIR
-
-        self.dim2loras = self.construct_search_space()
-        self.update_search_space(src_dir)
-
+            
+        def f_init(x): return obj_sim(self.gt_image_path, self.component_weights, x, weight_idx=1,
+                                      infer_image_func=self.infer_img_func,
+                                      output_dir=src_dir, to_vis=True, is_init=True, control_img=self.control_img)
+        self.f_init = f_init
+        x_observations, x_record, best_x = prepare_init_obs(self.num_observations, len(
+            self.component_weights), self.x_range, self.f_init, return_best=True, seed=self.seed)
+        self.x_record = x_record
+        
+        self.optimizer = pysps.Optimizer(len(self.component_weights), 
+                                          best_x, 
+                                          use_map_hyperparams=True)
+        
         if src_dir.exists():
             for p in sorted(src_dir.glob("init*.png")):
                 try:
@@ -736,386 +584,53 @@ class Engine:
         self.init_dir = src_dir
         os.makedirs(self.init_dir, exist_ok=True)
 
-        self.construct_init_samples()
-
         print("Warming up GPU pool...")
-        self._warmup_gpu_pool()
-
-        print("Engine started.")
-        self.save_state(reason="start")
-
-        pl.seed_everything(self.seed)
-
-    def next_stage_start(self, *, force: bool = False) -> bool:
-        if not self.stage_boundaries:
-            print('No stage iterations configured; skipping next stage request.')
-            return False
-        if not force and not self.is_stage_ready():
-            print('Next stage not ready yet; skipping advance.')
-            return False
-        if self.stage_index >= len(self.stage_boundaries):
-            print('All configured stages have already been started.')
-            return False
-
-        pl.seed_everything(self.seed)
-
-        self._archive_current_train_dataset(
-            reason=f"stage-{self.stage_index}-complete")
-        self._begin_new_train_dataset_version()
-
-        self.stage_index += 1
-        self.cur_step = 0
-        self.last_round_context = None
-
-        self.clear_outputs()
-
-        src_dir = WORKING_DIR
-
-        self.dim2loras = self.construct_search_space()
-        self.update_search_space(src_dir)
-        seed_context = self.construct_init_samples(
-            capture_context=True,
-            context_iteration=int(self.step) + 1,
-        )
-
-        if seed_context:
-            self.last_round_context = seed_context
-
-        pl.seed_everything(self.seed)
-        self.save_state(reason=f'stage-{self.stage_index}')
+        if self.gpu_pool and not self._pool_warmed:
+            await asyncio.to_thread(self._warmup_gpu_pool)
         
-        return True
-
-    def construct_search_space(self):
-        # Look at the current train_X and Y to determine which LoRAs are active
-        dim2loras = {
-            i: ([Path(c[0]).stem], 0) for i, c in enumerate(self.component_weights)}
-
-        if self.train_X is None:
-            return dim2loras
-
-        # Pick the x with the largest y
-        y_array = self.Y.detach().cpu().numpy().reshape(-1)
-        best_idx = int(np.argmax(y_array))
-        x_best = self.train_X[best_idx].reshape(-1)
-
-        print(f"x_best: {x_best}")
-        active_dims = (x_best > 0).nonzero(as_tuple=True)[0]
-        inactive_dims = (x_best == 0).nonzero(as_tuple=True)[0]
-
-        print(
-            f"Active dimensions: {active_dims}, Inactive dimensions: {inactive_dims}")
-
-        dim2loras = {d: loras for d, loras in dim2loras.items()
-                     if d in active_dims.tolist()}
-
-        # Filter train_X and Y to only keep rows whose non-zero dims match active_dims
-        train_X2 = self.train_X[torch.all(
-            self.train_X[:, inactive_dims] == 0, dim=1), :]
-        train_X2 = train_X2[:, active_dims]
-        Y2 = self.Y[torch.all(self.train_X[:, inactive_dims] == 0, dim=1), :]
-
-        sorted_indices = Y2.flatten().argsort(descending=True).squeeze()
-        train_X2 = train_X2[sorted_indices, :]
-        Y2 = Y2[sorted_indices, :]
-
-        if len(train_X2.shape) == 1:
-            train_X2 = train_X2.reshape(1, -1)
-        if len(Y2.shape) == 1:
-            Y2 = Y2.reshape(1, -1)
-
-        self.train_X = train_X2
-        self.Y = Y2
-
-        return dim2loras
-
-    def construct_init_samples(self, *, capture_context: bool = False, context_iteration: int | None = None):
+        # retrieve the first search plane for the first UI interaction
+        new_x = []
+        plane = self.optimizer.retrieve_search_plane()
+        radius = int((self.num_candidates - 1) / 2)
+        x_range = self.x_range
+        x_center = plane.center
         
-        inf_f = self.f_init if self.train_X is None else self.f
-        self.x_observations, x_record = prepare_init_obs_simplex(self.num_observations, len(
-            self.dim2loras), inf_f, seed=self.seed, sparse_threshold=0.1, sampler=sample_dirichlet_simplex)
-        seed_context: dict | None = None
-        context_iteration_value = context_iteration if context_iteration is not None else int(self.step)
-
-        # Reuse the existing train_X and Y if available
-        if self.train_X is not None and self.Y is not None:
-            assert self.train_X.shape[0] == self.Y.shape[0]
-            dist_threshold = 0.05
-            init_observations2 = [self.train_X[0]]
-            init_y2 = [self.Y[0]]
-            for i in range(1, self.train_X.shape[0]):
-                if len(init_observations2) >= self.max_num_observations/2:
-                    break
-                obs = self.train_X[i]
-                if not any(torch.norm(obs - o) < dist_threshold for o in init_observations2):
-                    init_observations2.append(obs)
-                    init_y2.append(self.Y[i])
-                else:
-                    print(
-                        f"Skipping observation {obs} as it is too close to existing ones.")
-
-            x_observations2 = self.x_observations[0]
-            y_observations2 = self.x_observations[1]
-            for i in range(len(x_observations2)):
-                sample = torch.from_numpy(
-                    x_observations2[i]).double().to(device)
-                y = torch.from_numpy(y_observations2[i]).double().to(device)
-                if not any(torch.norm(sample - o) < dist_threshold for o in init_observations2):
-                    init_observations2.append(sample)
-                    init_y2.append(y)
-                else:
-                    print(
-                        f"Skipping observation {sample} as it is too close to existing ones.")
-
-            init_observations2 = torch.stack(init_observations2).double()
-            y_observations2 = torch.tensor(
-                init_y2).double().reshape(-1, 1).to(device)
-            self.x_observations = (init_observations2.detach().cpu(
-            ).numpy(), y_observations2.detach().cpu().numpy())
-
-            self.x_record = {}
-
-            async def _seed_initial_slots() -> dict | None:
-                new_y = [0.0 for _ in range(init_observations2.shape[0])]
-                new_I = list(range(init_observations2.shape[0]))
-                round_id = int(time.time() * 1000)
-                iteration = int(context_iteration_value)
-                if self.gpu_pool:
-                    if not self._pool_warmed:
-                        self._warmup_gpu_pool()
-                    await self._generate_with_pool(init_observations2, new_I, new_y, round_id, iteration, emit_events=False)
-                else:
-                    await self._generate_in_process(init_observations2, new_I, new_y, round_id, iteration, emit_events=False)
-                return {
-                    "round": int(round_id),
-                    "n": int(init_observations2.shape[0]),
-                    "iteration": int(iteration),
-                    "new_x": init_observations2.detach().cpu().tolist(),
-                    "new_I": [int(i) for i in new_I],
-                    "new_y": [float(val) for val in new_y],
-                }
-
-            seed_context = asyncio.run(_seed_initial_slots())
-
-            print(f'In construct_init_samples: {self.x_record}')
+        for i in range(self.num_candidates):
+            for j in range(self.num_candidates):
+                cell_index = (i-radius, j-radius)
+                x = plane.calc_grid_parameters(cell_index, self.num_candidates, 0.5, [])
+                # Check if any element of x is outside [0, 1]
+                if x.min() < x_range[0] or x.max() > x_range[1]:
+                    x_0 = x.copy()
+                    # Make sure x is within the hyper-cube
+                    direction = x - x_center
+                    _, lambda_high = ray_box_steps(
+                        x_center, direction, low=0.0, high=1.0)
+                    x = x_center + lambda_high * direction
+                    
+                    # Clip to [0, 1]
+                    x = np.clip(x, 0.0, 1.0)
+                new_x.append(x)
+        
+        new_x = np.array(new_x)
+        new_x = torch.from_numpy(new_x).double().to(device)
+        new_I = [i for i in range(new_x.shape[0])]
+        new_y = [0 for _ in range(new_x.shape[0])]
+        
+        round_id = int(time.time() * 1000)
+        iteration = 0
+        
+        if self.gpu_pool:
+            await self._generate_with_pool(new_x, new_I, new_y, round_id, iteration)
         else:
-            self.x_record = x_record
-        if capture_context and seed_context:
-            seed_context.setdefault("ranking", [])
-            seed_context.setdefault("timestamp", time.time())
-            seed_context.setdefault("step", int(self.step))
-            seed_context.setdefault("stage_seed", True)
-        else:
-            seed_context = None if not capture_context else seed_context
-            
-        train_X, Y = self.x_observations
-        self.train_X = torch.from_numpy(train_X).double().to(device)
-        self.Y = torch.from_numpy(Y).double().to(device)
-            
-        return seed_context
+            await self._generate_in_process(new_x, new_I, new_y, round_id, iteration)
+                
+        new_y_results = list(new_y)
 
-    def update_search_space(self, init_src_dir):
-        lora2canon_dim = {
-            Path(c[0]).stem: i for i, c in enumerate(self.component_weights)}
-
-        lora_dim = len(lora2canon_dim)
-        self.lora_merge_indices = []
-        self.lora_merge_weights = []
-        dim_sorted = sorted(self.dim2loras.keys())
-        print(f'lora2canon_dim: {lora2canon_dim}')
-
-        for dim in dim_sorted:
-            loras = self.dim2loras[dim][0]
-            if len(loras) == 0:
-                continue
-            # All ones:
-            weights = [1.0 for _ in loras]
-            print(f'loras: {loras}, weight: {weights}')
-            self.lora_merge_indices += [lora2canon_dim[lora] for lora in loras]
-            self.lora_merge_weights += weights
-
-        print(f'lora_merge_indices: {self.lora_merge_indices}')
-        print(f'lora_merge_weights: {self.lora_merge_weights}')
-        # exit()
-
-        # Map each flattened LoRA entry to its dimension index (in dim_sorted order)
-        self.dim_index_per_lora: list[int] = []
-        for d_idx, dim in enumerate(dim_sorted):
-            self.dim_index_per_lora.extend(
-                [d_idx] * len(self.dim2loras[dim][0]))
-
-        def f_init_full(x):
-            return obj_sim(self.gt_image_path, self.component_weights, x, weight_idx=1,
-                           infer_image_func=self.infer_img_func,
-                           output_dir=init_src_dir, to_vis=True, is_init=True, control_img=self.control_img)
-
-        def f_init(w):
-            w_full = np.zeros(lora_dim)
-            # Scale each LoRA by its parent dimension's scalar weight
-            w_vec = w.reshape(-1)
-            scale = w_vec[np.asarray(self.dim_index_per_lora, dtype=int)]
-            w_full[self.lora_merge_indices] = np.asarray(
-                self.lora_merge_weights) * scale
-            print(
-                f'Merging weights: {self.lora_merge_indices} -> {self.lora_merge_weights}')
-            print(f'Scaling factors: {scale}')
-            print(f'f_init_extended: {w} -> {w_full}')
-            # exit()
-            return f_init_full(w_full.reshape(1, -1))
-
-        self.f_init = f_init
-
-        def f_full(x): return obj_sim(self.gt_image_path, self.component_weights, x, weight_idx=1,
-                                      infer_image_func=self.infer_img_func,
-                                      output_dir=OUTPUT_DIR, to_vis=True, is_init=False, control_img=self.control_img)
-
-        def f(w):
-            w_full = np.zeros(lora_dim)
-            # Scale each LoRA by its parent dimension's scalar weight
-            w_vec = w.reshape(-1)
-            scale = w_vec[np.asarray(self.dim_index_per_lora, dtype=int)]
-            w_full[self.lora_merge_indices] = np.asarray(
-                self.lora_merge_weights) * scale
-            print(
-                f'Merging weights: {self.lora_merge_indices} -> {self.lora_merge_weights}')
-            print(f'Scaling factors: {scale}')
-            print(f'f_extended: {w} -> {w_full}')
-            # exit()
-            return f_full(w_full.reshape(1, -1))
-
-        self.f = f
-
-    def build_tree(self):
-        # Build LoRA tree
-        folders = [str(c[0]).replace('.safetensors', '/')
-                   for c in self.component_weights]
-        # print(f'folders: {folders}')
-        lora_images = find_images_for_folders(folders)
-        res = build_cluster_hierarchy(
-            lora_images=lora_images,
-            # out_dir=str(args.dir),
-            out_dir=None,
-            pca_dim=16,
-            linkage='average',
-            # linkage='ward',
-            metric='cosine',
-            sanity_generate=False,
-        )
-        lora2canon_dim = {
-            Path(c[0]).stem: i for i, c in enumerate(self.component_weights)}
-        tree = res.get('tree') if isinstance(res, dict) else None
-        Z_link = np.asarray(tree['linkage_matrix'], dtype=float)
-        lora_tree = build_tree(Z_link)
-
-        active_loras = [
-            ([Path(c[0]).stem for c in self.component_weights], 0)]
-        print(f'active_loras: {active_loras}')
-        lora_clusters, dim2dims, cluster_counts = break_clusters_even(
-            active_loras, self.target_dim, lora2canon_dim, lora_tree,
-            alpha_config=self.alpha_context,
-            infer_image_func_packed=self.infer_image_func_packed)
-        dim2loras = {i: cluster for i,
-                     cluster in enumerate(lora_clusters)}
-
-        print(f'dim2loras: {dim2loras}')
-
-        return lora2canon_dim, dim2loras, dim2dims
 
     def f_to_np(self, x):
         """Convert input tensor to numpy array for the objective function."""
         return torch.from_numpy(self.f(x.detach().cpu().numpy())).to(device=x.device)
-
-    def acquire(self, gp):
-        qmc_sampler = SobolQMCNormalSampler(
-            sample_shape=torch.Size([self.MC_SAMPLES]))
-        acq_function = qUpperConfidenceBound(
-            model=gp,
-            beta=self.beta,
-            sampler=qmc_sampler       # reuse your existing QMC sampler
-        )
-        final_acq_function = qSimplexUpperConfidenceBound(
-            model=gp,
-            beta=self.beta,
-            sampler=qmc_sampler
-        )
-
-        eps = 1e-4  # small buffer away from 0/1 in parameter space
-
-        # --- 1. Coefficient-space bounds (sum x <= 1 handled elsewhere) ---
-        # x_range is presumably [0.0, 1.0]
-        coeff_bounds = torch.tensor(
-            [self.x_range] * self.train_X.shape[1]).double().to(device)
-        # shape (2, d), row 0 = lower, row 1 = upper
-        coeff_bounds = coeff_bounds.T.to(self.train_X)
-
-        # --- 2. Generate initial conditions in *coefficient space* as before ---
-        num_restarts = 20
-        raw_samples = 1024
-
-        start_time = time.time()
-        # Xinit_coeff = gen_batch_initial_conditions_l1(
-        #     acq_function,                # this acq is defined on coefficients
-        #     coeff_bounds,                # keep full [0,1] here
-        #     q=BATCH_SIZE,
-        #     num_restarts=num_restarts,
-        #     raw_samples=raw_samples,
-        # )
-
-        def generator(n, q, seed):
-            return qmc_simplex_generator(n, q, self.train_X.shape[1], seed)
-        Xinit_coeff = gen_batch_initial_conditions(
-            acq_function=acq_function,
-            bounds=coeff_bounds,
-            q=self.num_observations_per_step,
-            num_restarts=num_restarts,
-            raw_samples=raw_samples,
-            generator=generator
-        )
-        # Inverse stick-breaking: coeffs -> parameter space V in [0,1]
-        Xinit = inverse_stick_breaking_transform(Xinit_coeff)
-
-        # Clamp initial conditions away from hard boundaries for stability
-        Xinit = Xinit.clamp(min=eps, max=1 - eps)
-
-        end_time = time.time()
-        print(
-            f"Initial condition generation time: {end_time - start_time:.2f} seconds")
-
-        # --- 3. Parameter-space bounds for L-BFGS (shrunken) ---
-        param_bounds = coeff_bounds.clone()
-        param_bounds[0, :] = param_bounds[0, :] + \
-            eps      # lower bounds += eps
-        param_bounds[1, :] = param_bounds[1, :] - \
-            eps      # upper bounds -= eps
-
-        start_time = time.time()
-        new_x_ei, _ = optimize_acqf(
-            acq_function=final_acq_function,  # this one expects parameter-space X
-            bounds=param_bounds,              # use shrunken bounds here
-            q=self.num_observations_per_step,
-            num_restarts=num_restarts,
-            raw_samples=raw_samples,
-            batch_initial_conditions=Xinit,
-        )
-        end_time = time.time()
-        print(
-            f"Acquisition function optimization time: {end_time - start_time:.2f} seconds")
-        print(f"original new_x_ei: {new_x_ei}")
-
-        # Clamp once more just in case optimizer wandered numerically
-        # new_x_ei = new_x_ei.clamp(min=eps_round, max=1 - eps_round)
-        eps_round = eps + 1e-6
-        new_x_ei[new_x_ei <= eps_round] = 0
-        new_x_ei[new_x_ei >= 1 - eps_round] = 1
-
-        # --- 4. Map optimized parameters -> coefficients via stick breaking ---
-        new_x_ei = stick_breaking_transform(new_x_ei)
-
-        new_x_ei[new_x_ei <= eps_round] = 0
-        new_x_ei[new_x_ei >= 1 - eps_round] = 1
-        print(f"new_x_ei: {new_x_ei}")
-
-        return new_x_ei
 
     async def next(
         self,
@@ -1123,144 +638,30 @@ class Engine:
         round_id: int | None = None,
         limit: int | None = None,
     ) -> None:
-        # pick the user's top choice
+        
+        # pick the user's top choice, TODO: need to be updated to a grid interface input 
         self.last_selected_basename = ranking_basenames[0]
         img_name = Path(self.last_selected_basename).name
         print('X record:', self.x_record)
         assert img_name in self.x_record, f"Image {img_name} not found in record."
 
         self.clear_outputs()
-
-        # --- init / feedback ---
-        if self.cur_step == 0:
-            train_X, Y = self.x_observations
-
-            self.num_warmup = train_X.shape[0]
-            self.MC_SAMPLES = 256
-
-            self.last_past_indices = []
-
-        print(f'self.train_X: {self.train_X}')
-
-        ranked_indices = [
-            self.x_record[Path(img_name).name][1] for img_name in ranking_basenames]
-        comp_pairs = ranking2pairs(ranked_indices)
-        print(f'ranked_indices: {ranked_indices}')
-
-        comp_pairs = torch.tensor(comp_pairs, dtype=torch.long).to(device)
-        pairwise_gp = fit_gpytorch_pair_model(self.train_X, comp_pairs)
-        gp, latent_Y = pairwise_to_single_task(
-            self.train_X, self.Y, pairwise_gp)
-
-        print(f'ranked_indices: {ranked_indices}')
-
-        print('Acquiring GP...')
-        new_x = self.acquire(gp)
-        print(f'Acquired new_x: {new_x}')
-
-        # Estimate the latent Y values for new_x
-        pairwise_gp.eval()
-        with torch.no_grad():
-            # a MultivariateNormal
-            post = pairwise_gp.posterior(new_x)
-            new_latent_Y = post.mean.squeeze(-1).unsqueeze(-1)  # shape (n,1)
-        # Sort new_x based on estimated latent Y values (higher is better)
-        # descending order
-        ranked_new_indices = torch.argsort(-new_latent_Y, dim=0)
-        ranked_new_indices = ranked_new_indices.flatten()
-        new_x = new_x[ranked_new_indices]
-
-        # Add new_x to train_X
-        new_I = [ranked_indices[0]] + \
-            [self.train_X.shape[0] + i for i in range(new_x.shape[0])]
-        self.train_X = torch.cat([self.train_X, new_x], dim=0)
-
-        # Add the current best to the beginning of new_x
-        selected_x = self.x_record[img_name][0]
-        if isinstance(selected_x, np.ndarray):
-            selected_x = torch.from_numpy(selected_x).double().to(device)
-        new_x = torch.vstack([selected_x, new_x])
-
-        self.path.append(selected_x)
-
-        # --- slider setup ---
-        n = min(limit or self.num_observations_per_step + 1,
-                self.num_observations_per_step + 1)
-
-        # Do NOT clear outputs here; you overwrite slot files in place to avoid 404s
-        # self.clear_outputs()  # <- leave out to keep placeholders visible
-
-        if round_id is None:
-            round_id = int(asyncio.get_running_loop().time() * 1000)
-        iteration = int(self.step) + 1
-
-        self.ranking_history.append({
-            "step": int(self.step),
-            "round": int(round_id),
-            "ranking": list(ranking_basenames),
-            "indices": [int(x) for x in ranked_indices],
-            "selected": self.last_selected_basename,
-            "saved_at": time.time(),
-            "train_version": int(self.train_dataset_version),
-        })
-
-        ctx_new_x = new_x.detach().cpu().tolist()
-        self.last_round_context = {
-            "step": int(self.step),
-            "round": int(round_id),
-            "n": int(n),
-            "new_x": ctx_new_x,
-            "new_I": [int(i) for i in new_I],
-            "ranking": list(ranking_basenames),
-            "timestamp": time.time(),
-            "iteration": int(iteration),
-        }
-
-        # Tell clients a new round started
-        await self._events.put(("begin", {
-            "round": round_id,
-            "n": n,
-            "iteration": int(iteration),
-            "stage": self.stage_status(),
-        }))
-
-        # Iterate and generate each slot given new_x
-        new_y = [0 for _ in range(new_x.shape[0])]
-        if self.gpu_pool:
-            await self._generate_with_pool(new_x, new_I, new_y, round_id, iteration)
-        else:
-            await self._generate_in_process(new_x, new_I, new_y, round_id, iteration)
-        new_y_results = list(new_y)
-        if self.last_round_context is not None:
-            self.last_round_context["new_y"] = [
-                float(val) for val in new_y_results]
-
-        feedback_values = new_y_results[1::]
-        self.Y = torch.cat([self.Y, torch.from_numpy(
-            np.array(feedback_values).reshape(-1, 1)).double().to(device)], dim=0)
-
-        # Tell clients the round finished
-        self.step += 1
-        self.cur_step += 1
-        self.save_state(reason=f"step-{self.step}")
-
-        await self._events.put(("done", {
-            "round": round_id,
-            "iteration": int(iteration),
-            "stage": self.stage_status(),
-        }))
-
+        self.path.append(self.x_record[img_name][0])
+        print(
+            f"Submitting feedback {self.x_record[img_name][1]} for {img_name}")
+        self.optimizer.submit_feedback_data(self.x_record[img_name][1])
+        
+        
+        
 
 engine: Engine | None = None
-
 
 def _require_engine() -> Engine:
     if engine is None:
         raise RuntimeError("Engine is not initialized in this process.")
     return engine
 
-
-app.mount("/static", StaticFiles(directory="."), name="static")
+app.mount("/static", StaticFiles(directory="gallery"), name="static")
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 app.mount("/slots", StaticFiles(directory=str(SLOTS_DIR)), name="slots")
 
@@ -1268,13 +669,14 @@ app.mount("/slots", StaticFiles(directory=str(SLOTS_DIR)), name="slots")
 @app.get("/")
 def serve_index():
     # Serve index.html from the same folder as this file
-    return FileResponse("index.html")
-
+    index_path = FRONTEND_DIR / "gallery" / "index.html"
+    if not index_path.exists():
+        raise RuntimeError(f"Frontend file missing: {index_path}")
+    return FileResponse(str(index_path))
 
 @app.get("/api/health")
 def health() -> dict:
     return {"ok": True}
-
 
 @app.post("/api/state/save")
 def api_save_state(payload: dict | None = Body(default=None)) -> JSONResponse:
@@ -1361,9 +763,9 @@ def images() -> JSONResponse:
 
 
 @app.post("/api/start")
-def start() -> JSONResponse:
+async def start() -> JSONResponse:
     eng = _require_engine()
-    eng.start()
+    await eng.start()
     gt_url = eng.get_gt_image_url()
     iteration = int(getattr(eng, "step", 0))
 
