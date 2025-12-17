@@ -23,6 +23,10 @@ body{
   padding: 22px 16px 60px;
 }
 
+body.no-scroll{
+  overflow: hidden;
+}
+
 .app-shell{
   width: min(1380px, 96vw);
   display: grid;
@@ -383,6 +387,98 @@ body{
   color: var(--text-muted);
   font-size: 0.8rem;
   font-family: 'JetBrains Mono', 'Space Mono', monospace;
+}
+
+.description-button{
+  position: fixed;
+  bottom: 32px;
+  right: 32px;
+  appearance: none;
+  border: none;
+  padding: 14px 24px;
+  border-radius: 999px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  background: linear-gradient(135deg, #5f6af4, #8a74ff);
+  color: #fff;
+  box-shadow: 0 12px 30px rgba(47, 75, 191, 0.35);
+  cursor: pointer;
+  z-index: 1600;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+}
+
+.description-button:hover{
+  transform: translateY(-2px);
+  box-shadow: 0 16px 34px rgba(47, 75, 191, 0.4);
+}
+
+.description-button:active{
+  transform: translateY(1px);
+  box-shadow: 0 8px 24px rgba(47, 75, 191, 0.3);
+}
+
+.description-overlay{
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(8, 11, 27, 0.78);
+  z-index: 1700;
+}
+
+.description-content{
+  width: min(1200px, 96vw);
+  height: min(92vh, 880px);
+  background: #fff;
+  border-radius: 24px;
+  box-shadow: 0 28px 80px rgba(16, 21, 40, 0.32);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.description-header{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 24px;
+  border-bottom: 1px solid #e5e7f4;
+}
+
+.description-header h2{
+  margin: 0;
+  font-size: 1.1rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #1f2335;
+}
+
+.description-content iframe{
+  width: 100%;
+  flex: 1;
+  border: none;
+  background: #f8f9ff;
+}
+
+.description-close{
+  appearance: none;
+  background: transparent;
+  border: 1px solid #d0d5e6;
+  color: #1f2335;
+  font-weight: 600;
+  padding: 8px 16px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+.description-close:hover{
+  background: #e8ecff;
+  border-color: #c4caf7;
 }
 
 @media (max-width: 1180px){
