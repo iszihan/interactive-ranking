@@ -15,6 +15,9 @@ const historyList = document.getElementById("historyList");
 const descriptionToggle = document.getElementById("descriptionToggle");
 const descriptionOverlay = document.getElementById("descriptionOverlay");
 const descriptionClose = document.getElementById("descriptionClose");
+const tutorialToggle = document.getElementById("tutorialToggle");
+const tutorialOverlay = document.getElementById("tutorialOverlay");
+const tutorialClose = document.getElementById("tutorialClose");
 
 let currentIteration = null;
 let sliderRange = [0, 1];
@@ -41,6 +44,18 @@ function closeDescriptionOverlay() {
   setBodyScrollLock(false);
 }
 
+function openTutorialOverlay() {
+  if (!tutorialOverlay) return;
+  tutorialOverlay.classList.remove("hidden");
+  setBodyScrollLock(true);
+}
+
+function closeTutorialOverlay() {
+  if (!tutorialOverlay) return;
+  tutorialOverlay.classList.add("hidden");
+  setBodyScrollLock(false);
+}
+
 if (descriptionToggle) {
   descriptionToggle.addEventListener("click", openDescriptionOverlay);
 }
@@ -54,9 +69,29 @@ if (descriptionOverlay) {
     }
   });
 }
+
+if (tutorialToggle) {
+  tutorialToggle.addEventListener("click", openTutorialOverlay);
+}
+if (tutorialClose) {
+  tutorialClose.addEventListener("click", closeTutorialOverlay);
+}
+if (tutorialOverlay) {
+  tutorialOverlay.addEventListener("click", (event) => {
+    if (event.target === tutorialOverlay) {
+      closeTutorialOverlay();
+    }
+  });
+}
+
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && descriptionOverlay && !descriptionOverlay.classList.contains("hidden")) {
-    closeDescriptionOverlay();
+  if (event.key === "Escape") {
+    if (descriptionOverlay && !descriptionOverlay.classList.contains("hidden")) {
+      closeDescriptionOverlay();
+    }
+    if (tutorialOverlay && !tutorialOverlay.classList.contains("hidden")) {
+      closeTutorialOverlay();
+    }
   }
 });
 
@@ -462,6 +497,13 @@ async function renderFromSliders(options = {}) {
     if (Array.isArray(data.x)) {
       sliderState = data.x.slice();
       updateSliderInputsFromState();
+    }
+
+    if (data.iteration !== undefined) {
+      const iterValue = Number(data.iteration);
+      if (Number.isFinite(iterValue)) {
+        setIterationDisplay(iterValue);
+      }
     }
 
     updatePreviewImage(data.image || null);

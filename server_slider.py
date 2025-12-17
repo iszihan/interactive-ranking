@@ -48,6 +48,9 @@ WORKING_DIR.mkdir(parents=True, exist_ok=True)
 DESCRIPTION_DIR = FRONTEND_DIR / "description"
 DESCRIPTION_DIR.mkdir(parents=True, exist_ok=True)
 
+TUTORIAL_DIR = FRONTEND_DIR / "tutorial"
+TUTORIAL_DIR.mkdir(parents=True, exist_ok=True)
+
 STATE_PATH_OVERRIDE: Path | None = None
 STATE_SAVE_PATH_OVERRIDE: Path | None = None
 
@@ -366,6 +369,17 @@ class Engine:
             "timestamp": float(payload.get("timestamp") or time.time()),
         }
         self.slider_history.insert(0, entry)
+        self.get_slider_iteration()
+
+    def get_slider_iteration(self) -> int:
+        """Return the zero-based iteration index inferred from history/state."""
+        history_len = len(self.slider_history) if isinstance(self.slider_history, list) else 0
+        computed = max(0, history_len - 1) if history_len else 0
+        current = int(getattr(self, "step", 0) or 0)
+        if computed > current:
+            self.step = computed
+            current = computed
+        return current
 
     def get_slider_history_payload(self) -> list[dict]:
         history_payload: list[dict] = []
@@ -654,6 +668,7 @@ class Engine:
             self._record_slider_history(payload)
         if autosave:
             _save_slider_checkpoint(self, reason="slider-eval")
+        payload["iteration"] = self.get_slider_iteration()
         return payload
 
 
@@ -724,6 +739,7 @@ def _load_slider_checkpoint(eng: Engine, *, path: Path | str | None = None,
 app.mount(
     "/static", StaticFiles(directory=str(FRONTEND_DIR / "sliders")), name="static")
 app.mount("/description", StaticFiles(directory=str(DESCRIPTION_DIR)), name="description")
+app.mount("/tutorial", StaticFiles(directory=str(TUTORIAL_DIR)), name="tutorial")
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 app.mount("/slots", StaticFiles(directory=str(SLOTS_DIR)), name="slots")
 
@@ -866,7 +882,6 @@ def start() -> JSONResponse:
     eng = _require_engine()
     eng.start()
     gt_url = eng.get_gt_image_url()
-    iteration = int(getattr(eng, "step", 0))
     slider_meta = eng.get_slider_metadata()
     history_payload = eng.get_slider_history_payload()
     latest_image = None
@@ -916,6 +931,7 @@ def start() -> JSONResponse:
         images = _list_image_urls()
         latest_image = images[-1] if images else None
 
+    iteration = eng.get_slider_iteration()
     return JSONResponse({
         "gt_image": gt_url,
         "iteration": iteration,
