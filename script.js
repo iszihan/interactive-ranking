@@ -13,6 +13,9 @@ const referenceSection = document.getElementById("referenceSection");
 const referenceImg = document.getElementById("referenceImg");
 const zoomSection = document.getElementById("zoomSection");
 const zoomImg = document.getElementById("zoomImg");
+const descriptionToggle = document.getElementById("descriptionToggle");
+const descriptionOverlay = document.getElementById("descriptionOverlay");
+const descriptionClose = document.getElementById("descriptionClose");
 let currentIteration = null;
 
 const defaultStageState = {
@@ -26,6 +29,41 @@ const defaultStageState = {
 };
 let stageState = { ...defaultStageState };
 let isGenerationInFlight = false;
+
+function setBodyScrollLock(locked) {
+  document.body.classList.toggle("no-scroll", Boolean(locked));
+}
+
+function openDescriptionOverlay() {
+  if (!descriptionOverlay) return;
+  descriptionOverlay.classList.remove("hidden");
+  setBodyScrollLock(true);
+}
+
+function closeDescriptionOverlay() {
+  if (!descriptionOverlay) return;
+  descriptionOverlay.classList.add("hidden");
+  setBodyScrollLock(false);
+}
+
+if (descriptionToggle) {
+  descriptionToggle.addEventListener("click", openDescriptionOverlay);
+}
+if (descriptionClose) {
+  descriptionClose.addEventListener("click", closeDescriptionOverlay);
+}
+if (descriptionOverlay) {
+  descriptionOverlay.addEventListener("click", (event) => {
+    if (event.target === descriptionOverlay) {
+      closeDescriptionOverlay();
+    }
+  });
+}
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && descriptionOverlay && !descriptionOverlay.classList.contains("hidden")) {
+    closeDescriptionOverlay();
+  }
+});
 
 function normalizeStagePayload(stage) {
   if (!stage || typeof stage !== "object") {
