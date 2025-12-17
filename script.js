@@ -16,6 +16,9 @@ const zoomImg = document.getElementById("zoomImg");
 const descriptionToggle = document.getElementById("descriptionToggle");
 const descriptionOverlay = document.getElementById("descriptionOverlay");
 const descriptionClose = document.getElementById("descriptionClose");
+const tutorialToggle = document.getElementById("tutorialToggle");
+const tutorialOverlay = document.getElementById("tutorialOverlay");
+const tutorialClose = document.getElementById("tutorialClose");
 let currentIteration = null;
 
 const defaultStageState = {
@@ -43,7 +46,23 @@ function openDescriptionOverlay() {
 function closeDescriptionOverlay() {
   if (!descriptionOverlay) return;
   descriptionOverlay.classList.add("hidden");
-  setBodyScrollLock(false);
+  if (!tutorialOverlay || tutorialOverlay.classList.contains("hidden")) {
+    setBodyScrollLock(false);
+  }
+}
+
+function openTutorialOverlay() {
+  if (!tutorialOverlay) return;
+  tutorialOverlay.classList.remove("hidden");
+  setBodyScrollLock(true);
+}
+
+function closeTutorialOverlay() {
+  if (!tutorialOverlay) return;
+  tutorialOverlay.classList.add("hidden");
+  if (!descriptionOverlay || descriptionOverlay.classList.contains("hidden")) {
+    setBodyScrollLock(false);
+  }
 }
 
 if (descriptionToggle) {
@@ -59,9 +78,26 @@ if (descriptionOverlay) {
     }
   });
 }
+if (tutorialToggle) {
+  tutorialToggle.addEventListener("click", openTutorialOverlay);
+}
+if (tutorialClose) {
+  tutorialClose.addEventListener("click", closeTutorialOverlay);
+}
+if (tutorialOverlay) {
+  tutorialOverlay.addEventListener("click", (event) => {
+    if (event.target === tutorialOverlay) {
+      closeTutorialOverlay();
+    }
+  });
+}
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && descriptionOverlay && !descriptionOverlay.classList.contains("hidden")) {
+  if (event.key !== "Escape") return;
+  if (descriptionOverlay && !descriptionOverlay.classList.contains("hidden")) {
     closeDescriptionOverlay();
+  }
+  if (tutorialOverlay && !tutorialOverlay.classList.contains("hidden")) {
+    closeTutorialOverlay();
   }
 });
 
