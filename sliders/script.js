@@ -12,6 +12,9 @@ const sliderList = document.getElementById("sliderList");
 const renderBtn = document.getElementById("renderBtn");
 const historySection = document.getElementById("historySection");
 const historyList = document.getElementById("historyList");
+const descriptionToggle = document.getElementById("descriptionToggle");
+const descriptionOverlay = document.getElementById("descriptionOverlay");
+const descriptionClose = document.getElementById("descriptionClose");
 
 let currentIteration = null;
 let sliderRange = [0, 1];
@@ -21,6 +24,41 @@ let sliderThumbnails = [];
 let historyEntries = [];
 
 const HISTORY_EPSILON = 1e-4;
+
+function setBodyScrollLock(locked) {
+  document.body.classList.toggle("no-scroll", Boolean(locked));
+}
+
+function openDescriptionOverlay() {
+  if (!descriptionOverlay) return;
+  descriptionOverlay.classList.remove("hidden");
+  setBodyScrollLock(true);
+}
+
+function closeDescriptionOverlay() {
+  if (!descriptionOverlay) return;
+  descriptionOverlay.classList.add("hidden");
+  setBodyScrollLock(false);
+}
+
+if (descriptionToggle) {
+  descriptionToggle.addEventListener("click", openDescriptionOverlay);
+}
+if (descriptionClose) {
+  descriptionClose.addEventListener("click", closeDescriptionOverlay);
+}
+if (descriptionOverlay) {
+  descriptionOverlay.addEventListener("click", (event) => {
+    if (event.target === descriptionOverlay) {
+      closeDescriptionOverlay();
+    }
+  });
+}
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && descriptionOverlay && !descriptionOverlay.classList.contains("hidden")) {
+    closeDescriptionOverlay();
+  }
+});
 
 function clampSliderValue(value) {
   const min = Number(sliderRange[0] ?? 0);
