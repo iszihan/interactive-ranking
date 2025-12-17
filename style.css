@@ -104,9 +104,9 @@ body.no-scroll{
   border-color: #f8b798;
 }
 
-.description-button{
+.description-button,
+.tutorial-button{
   position: fixed;
-  bottom: 32px;
   right: 32px;
   appearance: none;
   border: none;
@@ -123,12 +123,17 @@ body.no-scroll{
   transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.2s ease;
 }
 
-.description-button:hover{
+.tutorial-button{ bottom: 32px; }
+.description-button{ bottom: 88px; }
+
+.description-button:hover,
+.tutorial-button:hover{
   transform: translateY(-2px);
   box-shadow: 0 16px 34px rgba(47, 75, 191, 0.4);
 }
 
-.description-button:active{
+.description-button:active,
+.tutorial-button:active{
   transform: translateY(1px);
   box-shadow: 0 8px 24px rgba(47, 75, 191, 0.3);
 }
