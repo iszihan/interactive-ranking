@@ -276,27 +276,21 @@ def prepare_init_obs_simplex(num_observations, num_dim, f,
     return (train_X.detach().cpu().numpy(), Y.detach().cpu().numpy()), x_record
 
 
-def prepare_init_pysps_plane(train_X, train_X_original, num_dim, f,
-                             seed=0, sparse_threshold=None):
+def prepare_init_pysps_plane(train_X, train_X_original, f,
+                             seed=0):
     """Prepare initial observations for the optimization."""
     pl.seed_everything(seed)
 
-    # Set small elements to zero if sparse_threshold is given
-    if sparse_threshold is not None:
-        train_X[torch.abs(train_X) < sparse_threshold] = 0.0
 
     x_record = {}
-    x_record_pysps = {}
     yy = []
     for i in range(train_X.shape[0]):
         sim_val, image_path = f(
             train_X[i].reshape(1, -1).detach().cpu().numpy())
         x_record[Path(image_path).name] = (
             train_X[i].detach().cpu().numpy(), i)
-        x_record_pysps[Path(image_path).name] = (
-            train_X_original[i].detach().cpu().numpy(), i)
         yy.append(sim_val)
 
     Y = torch.tensor(yy).double().reshape(-1, 1)
 
-    return (train_X.detach().cpu().numpy(), Y.detach().cpu().numpy()), x_record, x_record_pysps
+    return (train_X.detach().cpu().numpy(), Y.detach().cpu().numpy()), x_record
