@@ -13,6 +13,12 @@ const referenceSection = document.getElementById("referenceSection");
 const referenceImg = document.getElementById("referenceImg");
 const zoomSection = document.getElementById("zoomSection");
 const zoomImg = document.getElementById("zoomImg");
+const descriptionToggle = document.getElementById("descriptionToggle");
+const descriptionOverlay = document.getElementById("descriptionOverlay");
+const descriptionClose = document.getElementById("descriptionClose");
+const tutorialToggle = document.getElementById("tutorialToggle");
+const tutorialOverlay = document.getElementById("tutorialOverlay");
+const tutorialClose = document.getElementById("tutorialClose");
 let currentIteration = null;
 
 const defaultStageState = {
@@ -26,6 +32,74 @@ const defaultStageState = {
 };
 let stageState = { ...defaultStageState };
 let isGenerationInFlight = false;
+let selectedBrick = null;
+
+function setBodyScrollLock(locked) {
+  document.body.classList.toggle("no-scroll", Boolean(locked));
+}
+
+function openDescriptionOverlay() {
+  if (!descriptionOverlay) return;
+  descriptionOverlay.classList.remove("hidden");
+  setBodyScrollLock(true);
+}
+
+function closeDescriptionOverlay() {
+  if (!descriptionOverlay) return;
+  descriptionOverlay.classList.add("hidden");
+  setBodyScrollLock(false);
+}
+
+function openTutorialOverlay() {
+  if (!tutorialOverlay) return;
+  tutorialOverlay.classList.remove("hidden");
+  setBodyScrollLock(true);
+}
+
+function closeTutorialOverlay() {
+  if (!tutorialOverlay) return;
+  tutorialOverlay.classList.add("hidden");
+  setBodyScrollLock(false);
+}
+
+if (descriptionToggle) {
+  descriptionToggle.addEventListener("click", openDescriptionOverlay);
+}
+if (descriptionClose) {
+  descriptionClose.addEventListener("click", closeDescriptionOverlay);
+}
+if (descriptionOverlay) {
+  descriptionOverlay.addEventListener("click", (event) => {
+    if (event.target === descriptionOverlay) {
+      closeDescriptionOverlay();
+    }
+  });
+}
+
+if (tutorialToggle) {
+  tutorialToggle.addEventListener("click", openTutorialOverlay);
+}
+if (tutorialClose) {
+  tutorialClose.addEventListener("click", closeTutorialOverlay);
+}
+if (tutorialOverlay) {
+  tutorialOverlay.addEventListener("click", (event) => {
+    if (event.target === tutorialOverlay) {
+      closeTutorialOverlay();
+    }
+  });
+}
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    if (descriptionOverlay && !descriptionOverlay.classList.contains("hidden")) {
+      closeDescriptionOverlay();
+    }
+    if (tutorialOverlay && !tutorialOverlay.classList.contains("hidden")) {
+      closeTutorialOverlay();
+    }
+  }
+});
 
 function normalizeStagePayload(stage) {
   if (!stage || typeof stage !== "object") {
@@ -63,7 +137,8 @@ function applyStagePayload(stage) {
 function updateActionButtons() {
   const stageReady = stageState.hasStages && stageState.nextStageReady;
   if (nextBtn) {
-    nextBtn.disabled = Boolean(isGenerationInFlight || stageReady);
+    const hasSelection = Boolean(selectedBrick);
+    nextBtn.disabled = Boolean(isGenerationInFlight || stageReady || !hasSelection);
   }
   if (stageBtn) {
     const shouldShow = stageReady;
@@ -89,7 +164,6 @@ if (referenceSection) referenceSection.classList.add("hidden");
 if (iterationIndicator) iterationIndicator.classList.add("hidden");
 
 // ---------- selection (no drag ranking) ----------
-let selectedBrick = null;
 const SLOTS_BASE = "/slots"; // make sure this matches server
 
 function setIterationDisplay(value, { commit = true } = {}) {
@@ -142,6 +216,7 @@ function clearZoomSelection() {
     zoomImg.removeAttribute("data-src");
   }
   if (zoomSection) zoomSection.classList.add("hidden");
+  updateActionButtons();
 }
 
 function showZoomForBrick(brick) {
@@ -160,6 +235,7 @@ function showZoomForBrick(brick) {
   zoomImg.src = zoomSrc;
   zoomImg.dataset.src = canonical;
   zoomSection.classList.remove("hidden");
+  updateActionButtons();
 }
 
 // selection happens on click

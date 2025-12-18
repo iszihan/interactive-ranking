@@ -63,6 +63,12 @@ SLOTS_DIR.mkdir(parents=True, exist_ok=True)
 WORKING_DIR = OUTPUT_DIR / "work"
 WORKING_DIR.mkdir(parents=True, exist_ok=True)
 
+DESCRIPTION_DIR = FRONTEND_DIR / "description"
+DESCRIPTION_DIR.mkdir(parents=True, exist_ok=True)
+
+TUTORIAL_DIR = FRONTEND_DIR / "tutorial"
+TUTORIAL_DIR.mkdir(parents=True, exist_ok=True)
+
 STATE_PATH_OVERRIDE: Path | None = None
 STATE_SAVE_PATH_OVERRIDE: Path | None = None
 
@@ -905,6 +911,8 @@ def _require_engine() -> Engine:
 app.mount("/static", StaticFiles(directory="gallery"), name="static")
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 app.mount("/slots", StaticFiles(directory=str(SLOTS_DIR)), name="slots")
+app.mount("/description", StaticFiles(directory=str(DESCRIPTION_DIR)), name="description")
+app.mount("/tutorial", StaticFiles(directory=str(TUTORIAL_DIR)), name="tutorial")
 
 
 @app.get("/")

@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<title>Gallery Tutorial</title>
+	<style>
+		:root{
+			color-scheme: light;
+		}
+		body{
+			margin: 0;
+			font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+			background: #f5f6fb;
+			color: #101528;
+		}
+		.wrapper{
+			max-width: 960px;
+			margin: 0 auto;
+			padding: 36px clamp(18px, 4vw, 48px) 48px;
+			display: flex;
+			flex-direction: column;
+			gap: 28px;
+		}
+		h2{
+			margin: 0 0 12px;
+			font-size: clamp(1.25rem, 2.4vw, 1.8rem);
+			color: #252b4d;
+		}
+		p{
+			margin: 0 0 10px;
+			line-height: 1.65;
+		}
+		ul{
+			margin: 0 0 12px 20px;
+			padding: 0;
+			line-height: 1.6;
+		}
+		.section{
+			background: #fff;
+			border-radius: 20px;
+			padding: 24px clamp(18px, 3vw, 32px);
+			box-shadow: 0 20px 50px rgba(15, 20, 48, 0.08);
+		}
+		.section + .section{
+			opacity: 0.97;
+		}
+		.section strong{
+			color: #1d2a66;
+		}
+		.demo-figure{
+			margin: 16px 0 0;
+			border-radius: 18px;
+			overflow: hidden;
+			box-shadow: inset 0 0 0 1px rgba(16, 21, 40, 0.08);
+		}
+		.demo-figure img{
+			width: 100%;
+			display: block;
+		}
+		.demo-figure.is-overview{
+			max-width: min(720px, 92%);
+			margin-left: auto;
+			margin-right: auto;
+		}
+		.demo-figure.is-zoom,
+		.demo-figure.is-confirm{
+			max-width: min(520px, 85%);
+			margin-left: auto;
+			margin-right: auto;
+		}
+		.footer-note{
+			text-align: center;
+			font-weight: 600;
+			color: #37406b;
+		}
+	</style>
+</head>
+<body>
+	<div class="wrapper">
+		<section class="section">
+			<h2>1. Interface Overview</h2>
+			<p>This interface asks you to select the image that best matches a reference image.</p>
+			<ul>
+				<li>At the <strong>top left</strong>, an <strong>iteration counter</strong> shows your current progress.</li>
+				<li>On the <strong>left</strong>, you will see the <strong>reference image</strong>, labeled <em>“Match this image”</em>.</li>
+				<li>On the <strong>right</strong>, you will see a grid of <strong>candidate images</strong>.</li>
+				<li>A <strong>Next</strong> button at the bottom allows you to advance after making your selection.</li>
+				<li>In the <strong>bottom-right corner</strong>, the task description and this interface tutorial are available at any time.</li>
+			</ul>
+			<div class="demo-figure is-overview">
+				<img src="overview_gallery.jpg" alt="Annotated overview of the gallery interface" loading="lazy" />
+			</div>
+		</section>
+
+		<section class="section">
+			<h2>2. Image Selection and Zoom-In</h2>
+			<p>Your task is to choose the candidate image that is most visually similar to the reference.</p>
+			<ul>
+				<li>Click on a candidate image to <strong>select</strong> it.</li>
+				<li>When an image is selected, a <strong>zoomed view</strong> of the selected image automatically appears <strong>below the reference image</strong>.</li>
+				<li>You may click different candidate images to change your selection and update the zoomed view.</li>
+			</ul>
+			<p>Only one image can be selected at a time.</p>
+			<div class="demo-figure is-zoom">
+				<img src="gallery1.gif" alt="Animation showing image selection and zoom" loading="lazy" />
+			</div>
+		</section>
+
+		<section class="section">
+			<h2>3. Confirming Your Choice and Continuing</h2>
+			<p>Once you have selected an image:</p>
+			<ul>
+				<li>Click <strong>Next</strong> to confirm your choice and move on to the next iteration.</li>
+			</ul>
+			<div class="demo-figure is-confirm">
+				<img src="gallery2.gif" alt="Animation showing the Next step in the gallery flow" loading="lazy" />
+			</div>
+		</section>
+
+		<section class="section">
+			<h2>4. Instructions</h2>
+			<p>The task description and this interface tutorial are available at any time.</p>
+			<p>To access them, click the buttons located in the <strong>bottom-right corner</strong> of the interface.</p>
+		</section>
+
+		<p class="footer-note">Use this tutorial as a guide whenever you need a refresher.</p>
+	</div>
+</body>
+</html>
