@@ -1,4 +1,34 @@
 # server_bo.py
+from serialize import export_engine_state, apply_engine_state, save_engine_state, load_engine_state
+from async_multi_gpu_pool import MultiGPUInferPool
+from helper.sampler import qmc_simplex_generator, get_mcmc_from_cache
+from search_benchmark.acq_prior import (
+    qSimplexUpperConfidenceBound,
+    stick_breaking_transform, inverse_stick_breaking_transform
+)
+from botorch.optim.optimize import gen_batch_initial_conditions
+from botorch.optim import optimize_acqf
+from botorch.sampling.normal import SobolQMCNormalSampler
+from botorch.acquisition import (
+    qUpperConfidenceBound)
+from engine import (obj_sim, infer_image_img2img,
+                    prepare_init_obs, prepare_init_obs_simplex, prepare_init_pysps_plane, infer_image)
+from helper.sampler import sample_dirichlet_simplex
+from helper.infer import infer
+import pysps
+import pySequentialLineSearch
+from diffusers.utils import load_image
+import uvicorn
+import numpy as np
+from PIL import Image, ImageDraw
+from io import BytesIO
+from pydantic import BaseModel
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+from fastapi import FastAPI, Body
+import torch
+import pytorch_lightning as pl
+import multiprocessing
 import argparse
 import signal
 import atexit
@@ -13,42 +43,19 @@ import time
 import os
 import yaml
 import copy
+from itertools import combinations
 import sys
-from itertools import accumulate, combinations
-
-import multiprocessing
-
-import pytorch_lightning as pl
-import torch
-from fastapi import FastAPI, Body
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-from io import BytesIO
-from PIL import Image, ImageDraw
-import numpy as np
-import uvicorn
-from diffusers.utils import load_image
-import pySequentialLineSearch
-import pysps
-
 sys.path.append('/scratch/ondemand29/chenxil/code/mood-board')
-from helper.infer import infer
-from helper.sampler import sample_dirichlet_simplex
-from helper.build_clusters import build_cluster_hierarchy, find_images_for_folders, build_tree
-from search_benchmark.multi_solvers import break_clusters_even
-from search_benchmark.comparison_solvers import fit_gpytorch_pair_model, pairwise_to_single_task, generate_comparisons, generate_comparisons_index
-from engine import (obj_sim, infer_image_img2img,
-                    prepare_init_obs, prepare_init_obs_simplex, infer_image)
 
-from async_multi_gpu_pool import MultiGPUInferPool
-from serialize import export_engine_state, apply_engine_state, save_engine_state, load_engine_state
 
 CONFIG_FILE = Path(__file__).parent.resolve() / "config_gallery.yml"
 
 FRONTEND_DIR = Path(__file__).parent.resolve()
 OUTPUT_DIR = FRONTEND_DIR / "outputs"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+PREINIT_DIR = OUTPUT_DIR / "preinit"
+PREINIT_DIR.mkdir(parents=True, exist_ok=True)
 
 SLOTS_DIR = OUTPUT_DIR / "slots"
 SLOTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -84,6 +91,7 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # helpers ------------------------------------------------------------
 
+
 def ray_box_steps(p, v, low=0.0, high=1.0):
     p = np.asarray(p, dtype=float).flatten()
     v = np.asarray(v, dtype=float).flatten()
@@ -101,6 +109,7 @@ def ray_box_steps(p, v, low=0.0, high=1.0):
     t_minus = np.minimum(t_to_high_m, t_to_low_m).min()
 
     return float(-t_minus), float(t_plus)
+
 
 @app.on_event("startup")
 async def _init_engine_once():
@@ -165,13 +174,14 @@ class Engine:
         print(f"Outputs dir: {self.outputs_dir}")
 
         self.config_path = Path(config_path).resolve()
+        self.config_snapshot: dict | None = None
         self.state_path: Path | None = None
         self.save_state_path: Path | None = None
         self.autosave_enabled = True
         self.autoload_state = True
+        self.state_loaded = False
 
         self.step: int = 0
-        self.cur_step: int = 0
         self._events = asyncio.Queue()
 
         self.last_selected_basename = None
@@ -186,6 +196,7 @@ class Engine:
             config = yaml.safe_load(f) or {}
         if not isinstance(config, dict):
             raise ValueError("Config file must be a mapping.")
+        self.config_snapshot = copy.deepcopy(config)
 
         self.autosave_enabled = bool(config.get('autosave_enabled', True))
         self.autoload_state = bool(config.get('autoload_state', True))
@@ -203,7 +214,6 @@ class Engine:
             print(f"Engine save state path: {self.save_state_path}")
 
         self.num_observations = config.get('num_observations', 10)
-        self.num_candidates = config.get('num_candidates', 3)
         self.init_dir = config.get('init_dir', None)
         self.seed = config.get('seed', 0)
         self.gt_config = config.get('gt_config', '')
@@ -217,6 +227,23 @@ class Engine:
         self.num_observations_per_step = config.get(
             'num_observations_per_step', 5)
 
+        self.target_dim = config.get('target_dim', 8)
+        self.sample_past = config.get('sample_past', 2)
+        self.beta = config.get('beta', 9)
+
+        alpha_config = config.get('alpha_config', None)
+        self.alpha_config_base = None
+        if alpha_config:
+            try:
+                with open(alpha_config, 'r') as f_cfg:
+                    alpha_raw = yaml.safe_load(f_cfg) or {}
+            except Exception as exc:
+                print(f"Failed to load alpha_config {alpha_config}: {exc}")
+                alpha_raw = None
+            if isinstance(alpha_raw, dict):
+                self.alpha_config_base = alpha_raw.get(
+                    'alpha_search', alpha_raw)
+
         # Support for multi-GPU inference
         # gpu_ids: 0,1
         gpu_ids = config.get('gpu_ids', '')
@@ -226,6 +253,8 @@ class Engine:
             self.gpu_pool = MultiGPUInferPool(
                 gpu_ids=gpu_ids,
                 module_name="engine_worker")
+
+        pl.seed_everything(self.seed)
 
         # Parse prompt and components
         if '@' in self.gt_config:
@@ -237,6 +266,25 @@ class Engine:
             comp, weight = component.split(':')
             self.component_weights.append(
                 [comp.strip(), float(weight.strip())])
+
+        self.alpha_context = None
+        if self.alpha_config_base:
+            self.alpha_context = copy.deepcopy(self.alpha_config_base)
+            cache_dir_override = self.alpha_context.get(
+                'cache_dir') or 'alpha_cache'
+            cache_dir_resolved = str(
+                Path(str(cache_dir_override)).expanduser())
+            os.makedirs(cache_dir_resolved, exist_ok=True)
+            self.alpha_context['cache_dir'] = cache_dir_resolved
+            lora_meta = self.alpha_context.setdefault('loras', {})
+            for comp in self.component_weights:
+                comp_path = comp[0]
+                lora_id = Path(comp_path).stem
+                meta = lora_meta.setdefault(lora_id, {})
+                meta.setdefault('path', str(comp_path))
+                if 'image_dir' not in meta:
+                    meta['image_dir'] = str(
+                        Path(comp_path).with_suffix(''))
 
         control_img_path = WORKING_DIR / 'control.png'
         if not control_img_path.exists():
@@ -287,7 +335,7 @@ class Engine:
         else:
             self.gt_img = load_image(self.gt_image_path)  # .to(device)
             print(f"Loaded GT image from {self.gt_image_path}")
-            
+
         def f(x): return obj_sim(self.gt_image_path, self.component_weights, x, weight_idx=1,
                                  infer_image_func=self.infer_img_func,
                                  output_dir=OUTPUT_DIR, to_vis=True, is_init=False, control_img=self.control_img)
@@ -316,19 +364,16 @@ class Engine:
             image_path=image_path)[0]
 
     def _reset_runtime_state(self) -> None:
-        self.stage_index = 0
         self.x_record = {}
         self.x_observations = None
         self.train_X = None
         self.Y = None
-        
         self.path = []
-
-        self.train_dataset_history: list[dict] = []
-        self.train_dataset_version: int = 0
-
+        self.path_train_X = None
+        self.path_Y = None
         self.num_warmup = 0
         self.MC_SAMPLES = 0
+        self.I = []
         self.last_past_indices = []
         self.ranking_history: list[dict] = []
         self.last_round_context: dict | None = None
@@ -346,21 +391,66 @@ class Engine:
             "control_img_path": self.control_img_path,
             "weight_idx": 1,
         }
-    
-    def _build_worker_payload(self, x_vector: np.ndarray) -> dict:
-        lora_dim = len(self.component_weights)
-        w_full = np.zeros(lora_dim)
-        # Scale each LoRA by its parent dimension's scalar weight
-        w_vec = x_vector.reshape(-1)
-        scale = w_vec[np.asarray(self.dim_index_per_lora, dtype=int)]
-        w_full[self.lora_merge_indices] = np.asarray(
-            self.lora_merge_weights) * scale
 
+    def save_state(self, reason: str | None = None, path: Path | str | None = None, *, force: bool = False) -> Path | None:
+        target = path or self.save_state_path
+        if target is None:
+            print("No save-state path configured; skipping save.")
+            return None
+        target = Path(target)
+        if not force and not self.autosave_enabled and self.save_state_path and target == self.save_state_path:
+            print("Autosave disabled; skipping save.")
+            return None
+        try:
+            saved_path = save_engine_state(self, target, reason=reason)
+            print(
+                f"Saved engine state to {saved_path} ({reason or 'unspecified'})")
+            return saved_path
+        except Exception as exc:
+            print(f"Failed to save engine state to {target}: {exc}")
+            return None
+
+    def load_state(self, path: Path | str | None = None, *, reset: bool = False, force: bool = False) -> bool:
+        target = path or self.state_path
+        if target is None:
+            print("No state path configured; skipping load.")
+            return False
+        target = Path(target)
+        if not target.exists():
+            print(f"State file {target} does not exist.")
+            return False
+        if reset:
+            self._reset_runtime_state()
+        if not force and not self.autoload_state and target == self.state_path:
+            print("Autoload disabled; skipping load.")
+            return False
+        try:
+            payload = load_engine_state(target)
+            saved_meta = payload.get("metadata", {}) if isinstance(
+                payload, dict) else {}
+            saved_config = saved_meta.get("config_path")
+            if saved_config:
+                try:
+                    saved_path = Path(saved_config).resolve()
+                    if saved_path != self.config_path:
+                        print(
+                            f"Warning: loading state from {saved_path} while current config is {self.config_path}"
+                        )
+                except Exception:
+                    pass
+            apply_engine_state(self, payload, torch.device(device))
+            print(f"Loaded engine state from {target}")
+            return True
+        except Exception as exc:
+            print(f"Failed to load engine state from {target}: {exc}")
+            return False
+
+    def _build_worker_payload(self, x_vector: np.ndarray) -> dict:
         state = copy.deepcopy(self.worker_state_template or {})
         return {
             "state": state,
             "x": x_vector.tolist(),
-            "w": w_full.tolist(),
+            "w": x_vector.tolist(),
         }
 
     def _warmup_gpu_pool(self) -> None:
@@ -403,18 +493,17 @@ class Engine:
 
         self._pool_warmed = True
 
-    async def _finalize_slot(self, slot_idx: int, idx: int, data: bytes, x_vector: np.ndarray, round_id: int, iteration: int, *, emit_events: bool = True):
+    async def _finalize_slot(self, slot_idx: int, idx: int, data: bytes, x_vector: np.ndarray, round_id: int, iteration: int):
         out_path = SLOTS_DIR / f"slot-{slot_idx}.png"
         await asyncio.to_thread(out_path.write_bytes, data)
-        if emit_events:
-            await self._events.put(("slot", {
-                "round": round_id,
-                "slot": slot_idx,
-                "iteration": int(iteration),
-            }))
+        await self._events.put(("slot", {
+            "round": round_id,
+            "slot": slot_idx,
+            "iteration": int(iteration),
+        }))
         self.x_record[out_path.name] = (x_vector, int(idx))
 
-    async def _generate_with_pool(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int, *, emit_events: bool = True):
+    async def _generate_with_pool(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int):
         pending: dict[int, tuple[int, int]] = {}
         for i in range(new_x.shape[0]):
             x_trial = new_x[i]
@@ -436,9 +525,9 @@ class Engine:
                 data = data.tobytes()
             x_vec = np.array(result["x"], dtype=np.float64)
             new_y[slot_idx] = float(result["sim_val"])
-            await self._finalize_slot(slot_idx, idx, data, x_vec, round_id, iteration, emit_events=emit_events)
+            await self._finalize_slot(slot_idx, idx, data, x_vec, round_id, iteration)
 
-    async def _generate_in_process(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int, *, emit_events: bool = True):
+    async def _generate_in_process(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int):
         for i in range(new_x.shape[0]):
             x_trial = new_x[i]
             if isinstance(x_trial, torch.Tensor):
@@ -446,7 +535,7 @@ class Engine:
             idx = new_I[i]
             data, x_vec, y = await asyncio.to_thread(_make_generation, self, x_trial)
             new_y[i] = float(np.asarray(y).flatten()[0])
-            await self._finalize_slot(i, idx, data, x_vec, round_id, iteration, emit_events=emit_events)
+            await self._finalize_slot(i, idx, data, x_vec, round_id, iteration)
 
     async def recall_last_round(self, *, emit_events: bool = False) -> bool:
         ctx = self.last_round_context or {}
@@ -528,13 +617,8 @@ class Engine:
                 pass
         print("Cleared outputs.")
 
-    async def start(self) -> None:
-        """Initialize the engine and generate the first 3x3 grid."""
-        pl.seed_everything(self.seed)
-        pysps.set_seed(self.seed)
-
+    def start(self) -> None:
         self.step = 0
-        self.cur_step = 0
         self.last_selected_basename = None
         self._reset_runtime_state()
 
@@ -542,91 +626,112 @@ class Engine:
         if self.autoload_state:
             restored = self.load_state()
 
+        # # Initialize mcmc cache regardless of restore state
+        # get_mcmc_from_cache()
+
         self.clear_outputs()
 
         if restored:
             print(f"Restored engine state from {self.state_path}")
-            if self.gpu_pool and not self._pool_warmed:
-                await asyncio.to_thread(self._warmup_gpu_pool)
+            self._warmup_gpu_pool()
             if self.last_round_context:
                 try:
-                    await self.recall_last_round()
+                    asyncio.run(self.recall_last_round())
                 except Exception as exc:
                     print(f"Failed to recall last round during start: {exc}")
             else:
                 print("No last round context to recall; outputs remain unchanged.")
             return
 
-        print('Starting with initial images...')
+        print(f'Starting with {self.num_observations} initial images...')
         if self.init_dir is not None:
             src_dir = Path(self.init_dir)
         else:
             src_dir = WORKING_DIR
-            
-        def f_init(x): return obj_sim(self.gt_image_path, self.component_weights, x, weight_idx=1,
-                                      infer_image_func=self.infer_img_func,
-                                      output_dir=src_dir, to_vis=True, is_init=True, control_img=self.control_img)
+
+        def f_preinit(x):
+            return obj_sim(self.gt_image_path, self.component_weights, x, weight_idx=1,
+                           infer_image_func=self.infer_img_func,
+                           output_dir=src_dir / 'preinit', to_vis=True, is_init=True, control_img=self.control_img)
+
+        def f_init(x):
+            return obj_sim(self.gt_image_path, self.component_weights, x, weight_idx=1,
+                           infer_image_func=self.infer_img_func,
+                           output_dir=src_dir, to_vis=True, is_init=True, control_img=self.control_img)
+
         self.f_init = f_init
-        x_observations, x_record, best_x = prepare_init_obs(self.num_observations, len(
-            self.component_weights), self.x_range, self.f_init, return_best=True, seed=self.seed)
-        self.x_record = x_record
-        
-        self.optimizer = pysps.Optimizer(len(self.component_weights), 
-                                          best_x, 
-                                          use_map_hyperparams=True)
-        
+        self.f_preinit = f_preinit
+        if not os.path.exists(src_dir / 'preinit'):
+            os.makedirs(src_dir / 'preinit', exist_ok=True)
+
+        init_observations, x_record = prepare_init_obs_simplex(self.num_observations, len(
+            self.component_weights), self.f_preinit, seed=self.seed, sparse_threshold=None, sampler=sample_dirichlet_simplex)
+
+        # pick the best one to initiate the first gallery plane
         if src_dir.exists():
             for p in sorted(src_dir.glob("init*.png")):
                 try:
                     shutil.copy2(p, OUTPUT_DIR / p.name)
                 except Exception:
                     pass
-        self.init_dir = src_dir
-        os.makedirs(self.init_dir, exist_ok=True)
 
-        print("Warming up GPU pool...")
-        if self.gpu_pool and not self._pool_warmed:
-            await asyncio.to_thread(self._warmup_gpu_pool)
-        
-        # retrieve the first search plane for the first UI interaction
-        new_x = []
-        plane = self.optimizer.retrieve_search_plane()
-        radius = int((self.num_candidates - 1) / 2)
-        x_range = self.x_range
-        x_center = plane.center
-        
-        for i in range(self.num_candidates):
-            for j in range(self.num_candidates):
-                cell_index = (i-radius, j-radius)
-                x = plane.calc_grid_parameters(cell_index, self.num_candidates, 0.5, [])
+        x_observations_score = init_observations[1]
+        best_x = init_observations[0][np.argmax(x_observations_score)]
+        self.pysps_optimizer = pysps.Optimizer(len(self.component_weights),
+                                               best_x,
+                                               use_map_hyperparams=True)
+        self.pysps_num_candidates = 3  # TODO: add this as a config var
+        self.pysps_radius = int((self.pysps_num_candidates - 1) / 2)
+        self.pysps_x_range = [0.0, 1.0]
+        self.plane = self.pysps_optimizer.retrieve_search_plane()
+        x_center = self.plane.get_center()
+        X = []
+        X_original = []
+        for i in range(self.pysps_num_candidates):
+            for j in range(self.pysps_num_candidates):
+                cell_index = (i - self.pysps_radius, j - self.pysps_radius)
+                x = self.plane.calc_grid_parameters(
+                    cell_index, self.pysps_num_candidates, 0.5, [])
+                x_original = x.copy()
+
+                # x = (x + 1.0) / 2.0  # normalize to [0, 1]
                 # Check if any element of x is outside [0, 1]
-                if x.min() < x_range[0] or x.max() > x_range[1]:
+                if x.min() < self.pysps_x_range[0] or x.max() > self.pysps_x_range[1]:
                     x_0 = x.copy()
                     # Make sure x is within the hyper-cube
                     direction = x - x_center
+                    direction = direction / np.linalg.norm(direction)
                     _, lambda_high = ray_box_steps(
                         x_center, direction, low=0.0, high=1.0)
+
                     x = x_center + lambda_high * direction
-                    
+
                     # Clip to [0, 1]
                     x = np.clip(x, 0.0, 1.0)
-                new_x.append(x)
-        
-        new_x = np.array(new_x)
-        new_x = torch.from_numpy(new_x).double().to(device)
-        new_I = [i for i in range(new_x.shape[0])]
-        new_y = [0 for _ in range(new_x.shape[0])]
-        
-        round_id = int(time.time() * 1000)
-        iteration = 0
-        
-        if self.gpu_pool:
-            await self._generate_with_pool(new_x, new_I, new_y, round_id, iteration)
-        else:
-            await self._generate_in_process(new_x, new_I, new_y, round_id, iteration)
-                
-        new_y_results = list(new_y)
+                    print(f'Clipping x: {x_0} (centered at {x_center}) to {x}')
+                X.append(x)
+                X_original.append(x_original)
 
+        X = torch.tensor(np.array(X), dtype=torch.double).to(device)
+        X_original = torch.tensor(
+            np.array(X_original), dtype=torch.double).to(device)
+        self.x_observations, plane_x_record = prepare_init_pysps_plane(
+            X, X_original, self.f_init, seed=self.seed)
+        self.x_record = plane_x_record
+        print("Done generating the initial plane observations.")
+
+        if src_dir.exists():
+            for p in sorted(src_dir.glob("init*.png")):
+                try:
+                    shutil.copy2(p, OUTPUT_DIR / p.name)
+                except Exception:
+                    pass
+
+        print("Warming up GPU pool...")
+        self._warmup_gpu_pool()
+
+        print("Engine started.")
+        self.save_state(reason="start")
 
     def f_to_np(self, x):
         """Convert input tensor to numpy array for the objective function."""
@@ -634,32 +739,168 @@ class Engine:
 
     async def next(
         self,
-        ranking_basenames: list[str],
+        selection_basenames: list[str],
         round_id: int | None = None,
         limit: int | None = None,
     ) -> None:
-        
-        # pick the user's top choice, TODO: need to be updated to a grid interface input 
-        self.last_selected_basename = ranking_basenames[0]
+
+        # Pick the user's chosen image (first entry of selection list)
+        self.last_selected_basename = selection_basenames[0]
         img_name = Path(self.last_selected_basename).name
-        print('X record:', self.x_record)
+        # print('X record:', self.x_record)
         assert img_name in self.x_record, f"Image {img_name} not found in record."
+        print(img_name)
+
+        # submit user's choice for pysps optimizer
+        x_selected_original = self.x_record[img_name][0]
+        self.pysps_optimizer.submit_data(
+            x_selected_original, self.plane.get_vertices())
+
+        # Add the current selecton to path
+        selected_x = self.x_record[img_name][0]
+        if isinstance(selected_x, np.ndarray):
+            selected_x = torch.from_numpy(selected_x).double().to(device)
+        self.path.append(selected_x)
 
         self.clear_outputs()
-        self.path.append(self.x_record[img_name][0])
-        print(
-            f"Submitting feedback {self.x_record[img_name][1]} for {img_name}")
-        self.optimizer.submit_feedback_data(self.x_record[img_name][1])
-        
-        
-        
+
+        # retrieve the next search plane based on user feedback
+
+        # --- init / feedback ---
+        if self.step == 0:
+            pl.seed_everything(self.seed)
+
+            train_X, Y = self.x_observations
+            self.train_X = torch.from_numpy(train_X).double().to(device)
+            self.Y = torch.from_numpy(Y).double().to(device)
+
+            self.num_warmup = train_X.shape[0]
+            self.MC_SAMPLES = 256
+            self.path_train_X = self.train_X.clone()
+            self.path_Y = self.Y.clone()
+            self.path = []
+            self.I = [0 for _ in range(self.train_X.shape[0])]
+
+            self.last_past_indices = []
+
+        print(f'self.train_X: {self.train_X}')
+
+        ranked_indices = [
+            self.x_record[Path(img_name).name][1] for img_name in selection_basenames]
+        print(f'ranked_indices: {ranked_indices}')
+
+        # retrieve the next x on next search plane
+        self.plane = self.pysps_optimizer.retrieve_search_plane()
+        x_center = self.plane.get_center()
+        print(f'x_center: {x_center}')
+        new_X = []
+        new_X_original = []
+        for i in range(self.pysps_num_candidates):
+            for j in range(self.pysps_num_candidates):
+                cell_index = (i - self.pysps_radius, j - self.pysps_radius)
+                x = self.plane.calc_grid_parameters(
+                    cell_index, self.pysps_num_candidates, 0.5, [])
+                x_original = x.copy()
+
+                print(f'Cell index: {cell_index}, x before clipping: {x}')
+
+                # x = (x + 1.0) / 2.0  # normalize to [0, 1]
+                # Check if any element of x is outside [0, 1]
+                if x.min() < self.pysps_x_range[0] or x.max() > self.pysps_x_range[1]:
+                    x_0 = x.copy()
+                    # Make sure x is within the hyper-cube
+                    direction = x - x_center
+                    direction = direction / np.linalg.norm(direction)
+                    _, lambda_high = ray_box_steps(
+                        x_center, direction, low=0.0, high=1.0)
+
+                    x = x_center + lambda_high * direction
+
+                    # Clip to [0, 1]
+                    x = np.clip(x, 0.0, 1.0)
+                    print(f'Clipping x: {x_0} (centered at {x_center}) to {x}')
+                new_X.append(x)
+                new_X_original.append(x_original)
+
+        new_x = torch.tensor(np.array(new_X), dtype=torch.double).to(device)
+        new_x_original = torch.tensor(
+            np.array(new_X_original), dtype=torch.double).to(device)
+        new_I = [self.train_X.shape[0] +
+                 i for i in range(self.pysps_num_candidates**2)]
+
+        # --- slider setup ---
+        n = min(limit or self.num_observations_per_step + 1,
+                self.num_observations_per_step + 1)
+
+        # Do NOT clear outputs here; you overwrite slot files in place to avoid 404s
+        # self.clear_outputs()  # <- leave out to keep placeholders visible
+
+        if round_id is None:
+            round_id = int(asyncio.get_running_loop().time() * 1000)
+        iteration = int(self.step) + 1
+
+        self.ranking_history.append({
+            "step": int(self.step),
+            "round": int(round_id),
+            # keep field name for backward compat
+            "ranking": list(selection_basenames),
+            "indices": [int(x) for x in ranked_indices],
+            "selected": self.last_selected_basename,
+            "saved_at": time.time(),
+        })
+
+        ctx_new_x = new_x.detach().cpu().tolist()
+        self.last_round_context = {
+            "step": int(self.step),
+            "round": int(round_id),
+            "n": int(n),
+            "new_x": ctx_new_x,
+            "new_I": [int(i) for i in new_I],
+            "selection": list(selection_basenames),
+            "timestamp": time.time(),
+            "iteration": int(iteration),
+        }
+
+        # Tell clients a new round started
+        await self._events.put(("begin", {
+            "round": round_id,
+            "n": n,
+            "iteration": int(iteration),
+        }))
+
+        # Iterate and generate each slot given new_x
+        new_y = [0 for _ in range(new_x.shape[0])]
+        if self.gpu_pool:
+            await self._generate_with_pool(new_x, new_I, new_y, round_id, iteration)
+        else:
+            await self._generate_in_process(new_x, new_I, new_y, round_id, iteration)
+        new_y_results = list(new_y)
+        if self.last_round_context is not None:
+            self.last_round_context["new_y"] = [
+                float(val) for val in new_y_results]
+
+        feedback_values = new_y_results[1::]
+        self.Y = torch.cat([self.Y, torch.from_numpy(
+            np.array(feedback_values).reshape(-1, 1)).double().to(device)], dim=0)
+
+        # Tell clients the round finished
+        await self._events.put(("done", {
+            "round": round_id,
+            "iteration": int(iteration),
+        }))  # <-- await
+
+        self.step += 1
+        self.save_state(reason=f"step-{self.step}")
+
 
 engine: Engine | None = None
+
 
 def _require_engine() -> Engine:
     if engine is None:
         raise RuntimeError("Engine is not initialized in this process.")
     return engine
+
 
 app.mount("/static", StaticFiles(directory="gallery"), name="static")
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
@@ -674,9 +915,11 @@ def serve_index():
         raise RuntimeError(f"Frontend file missing: {index_path}")
     return FileResponse(str(index_path))
 
+
 @app.get("/api/health")
 def health() -> dict:
     return {"ok": True}
+
 
 @app.post("/api/state/save")
 def api_save_state(payload: dict | None = Body(default=None)) -> JSONResponse:
@@ -763,9 +1006,9 @@ def images() -> JSONResponse:
 
 
 @app.post("/api/start")
-async def start() -> JSONResponse:
+def start() -> JSONResponse:
     eng = _require_engine()
-    await eng.start()
+    eng.start()
     gt_url = eng.get_gt_image_url()
     iteration = int(getattr(eng, "step", 0))
 
@@ -780,7 +1023,6 @@ async def start() -> JSONResponse:
                 "images": images,
                 "gt_image": gt_url,
                 "iteration": iteration,
-                "stage": eng.stage_status(),
             }, headers={"Cache-Control": "no-store"})
         time.sleep(0.2)  # small sleep to avoid busy-wait
 
@@ -790,17 +1032,13 @@ async def start() -> JSONResponse:
         "images": [],
         "gt_image": gt_url,
         "iteration": iteration,
-        "stage": eng.stage_status(),
     }, status_code=202)
 
 
 class NextRequest(BaseModel):
-    ranking: List[str]
+    selection: Optional[str] = None  # single chosen image (preferred)
+    ranking: Optional[List[str]] = None  # backward-compatible
     n: Optional[int] = None
-
-
-class StageAdvanceRequest(BaseModel):
-    force: bool = False
 
 
 # helper: get "foo.png" from any string, ignore blob:
@@ -822,23 +1060,37 @@ def extract_basename(s: str) -> str | None:
 @app.post("/api/next")
 async def next_step(req: NextRequest) -> JSONResponse:
     eng = _require_engine()
-    # IMPORTANT: do NOT clear the slots; optional: clear only historical outputs
-    # If you want to keep a cleanup, make sure it doesn't touch SLOTS_DIR.
-    # await asyncio.to_thread(engine.clear_outputs, keep_slots=True)
 
-    # Normalize ranking -> basenames
-    basenames = [b for b in (extract_basename(x) for x in req.ranking) if b]
+    # Normalize selection (preferred) or fall back to ranking[0]
+    chosen = None
+    if req.selection:
+        chosen = extract_basename(req.selection)
+    if not chosen and req.ranking:
+        # use the first entry as the chosen one
+        for x in req.ranking:
+            b = extract_basename(x)
+            if b:
+                chosen = b
+                break
+
+    if not chosen:
+        return JSONResponse(
+            {"error": "No selection provided"},
+            status_code=400,
+        )
+
+    basenames = [chosen]
 
     # decide how many to generate
     per_step = getattr(eng, "num_observations_per_step",
                        eng.num_observations_per_step)
     per_step += 1
-    n = min(req.n or len(basenames) or per_step, per_step)
+    n = min(req.n or per_step, per_step)
 
     # cache-buster round id
     round_id = int(asyncio.get_running_loop().time() * 1000)
 
-    print("Ranking received:", basenames, "n:", n, "round:", round_id)
+    print("Selection received:", basenames, "n:", n, "round:", round_id)
 
     # fire-and-forget generation; it must emit ("begin"/"slot"/"done") to SSE
     asyncio.create_task(eng.next(basenames, round_id=round_id, limit=n))
@@ -846,49 +1098,9 @@ async def next_step(req: NextRequest) -> JSONResponse:
     return JSONResponse({
         "round": round_id,
         "n": n,
-        "accepted_ranking": basenames,
+        "accepted_selection": chosen,
         "selected_basename": getattr(eng, "last_selected_basename", None),
     })
-
-
-@app.get("/api/stage/status")
-async def api_stage_status() -> JSONResponse:
-    eng = _require_engine()
-    return JSONResponse({
-        "stage": eng.stage_status(),
-        "images": _list_image_urls(),
-    })
-
-
-@app.post("/api/stage/next")
-async def api_stage_next(req: StageAdvanceRequest | None = None) -> JSONResponse:
-    eng = _require_engine()
-    force_flag = bool(getattr(req, "force", False)) if req else False
-    advanced = await asyncio.to_thread(eng.next_stage_start, force=force_flag)
-    if advanced:
-        await eng.emit_stage_update()
-
-    reason = None
-    if not advanced:
-        if not eng.stage_boundaries:
-            reason = "no-stages"
-        elif eng.stage_index >= len(eng.stage_boundaries):
-            reason = "completed"
-        elif not eng.is_stage_ready():
-            reason = "not-ready"
-        else:
-            reason = "blocked"
-
-    payload = {
-        "advanced": bool(advanced),
-        "stage": eng.stage_status(),
-        "images": _list_image_urls(),
-    }
-    if reason:
-        payload["reason"] = reason
-
-    status_code = 200 if advanced else 409
-    return JSONResponse(payload, status_code=status_code)
 
 
 @app.get("/api/events")
@@ -978,5 +1190,4 @@ if __name__ == "__main__":
             f"[cli] Using engine save state path override: {STATE_SAVE_PATH_OVERRIDE}")
 
     _register_shutdown_handlers()
-    # uvicorn.run("server_bo:app", host="127.0.0.1", port=8000, reload=True)
-    uvicorn.run("server_bo:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("server_gallery:app", host="0.0.0.0", port=8000, reload=True)
