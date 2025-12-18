@@ -1,22 +1,11 @@
 # server_bo.py
-from serialize import export_engine_state, apply_engine_state, save_engine_state, load_engine_state
+from serialize import apply_engine_state, save_engine_state, load_engine_state
 from async_multi_gpu_pool import MultiGPUInferPool
-from helper.sampler import qmc_simplex_generator, get_mcmc_from_cache
-from search_benchmark.acq_prior import (
-    qSimplexUpperConfidenceBound,
-    stick_breaking_transform, inverse_stick_breaking_transform
-)
-from botorch.optim.optimize import gen_batch_initial_conditions
-from botorch.optim import optimize_acqf
-from botorch.sampling.normal import SobolQMCNormalSampler
-from botorch.acquisition import (
-    qUpperConfidenceBound)
 from engine import (obj_sim, infer_image_img2img,
-                    prepare_init_obs, prepare_init_obs_simplex, prepare_init_pysps_plane, infer_image)
+                    prepare_init_obs_simplex, infer_image)
 from helper.sampler import sample_dirichlet_simplex
 from helper.infer import infer
 import pysps
-import pySequentialLineSearch
 from diffusers.utils import load_image
 import uvicorn
 import numpy as np
@@ -28,7 +17,6 @@ from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi import FastAPI, Body
 import torch
 import pytorch_lightning as pl
-import multiprocessing
 import argparse
 import signal
 import atexit
@@ -460,6 +448,7 @@ class Engine:
         }
 
     def _warmup_gpu_pool(self) -> None:
+        return 
         if not self.gpu_pool or self._pool_warmed:
             return
 
@@ -623,7 +612,7 @@ class Engine:
                 pass
         print("Cleared outputs.")
 
-    def start(self) -> None:
+    async def start(self) -> None:
         self.step = 0
         self.last_selected_basename = None
         self._reset_runtime_state()
@@ -642,7 +631,7 @@ class Engine:
             self._warmup_gpu_pool()
             if self.last_round_context:
                 try:
-                    asyncio.run(self.recall_last_round())
+                    await self.recall_last_round()
                 except Exception as exc:
                     print(f"Failed to recall last round during start: {exc}")
             else:
@@ -673,14 +662,6 @@ class Engine:
         init_observations, x_record = prepare_init_obs_simplex(self.num_observations, len(
             self.component_weights), self.f_preinit, seed=self.seed, sparse_threshold=None, sampler=sample_dirichlet_simplex)
 
-        # pick the best one to initiate the first gallery plane
-        if src_dir.exists():
-            for p in sorted(src_dir.glob("init*.png")):
-                try:
-                    shutil.copy2(p, OUTPUT_DIR / p.name)
-                except Exception:
-                    pass
-
         x_observations_score = init_observations[1]
         best_x = init_observations[0][np.argmax(x_observations_score)]
         self.pysps_optimizer = pysps.Optimizer(len(self.component_weights),
@@ -692,13 +673,11 @@ class Engine:
         self.plane = self.pysps_optimizer.retrieve_search_plane()
         x_center = self.plane.get_center()
         X = []
-        X_original = []
         for i in range(self.pysps_num_candidates):
             for j in range(self.pysps_num_candidates):
                 cell_index = (i - self.pysps_radius, j - self.pysps_radius)
                 x = self.plane.calc_grid_parameters(
                     cell_index, self.pysps_num_candidates, 0.5, [])
-                x_original = x.copy()
 
                 # x = (x + 1.0) / 2.0  # normalize to [0, 1]
                 # Check if any element of x is outside [0, 1]
@@ -715,23 +694,29 @@ class Engine:
                     # Clip to [0, 1]
                     x = np.clip(x, 0.0, 1.0)
                     print(f'Clipping x: {x_0} (centered at {x_center}) to {x}')
+                print(f'Cell index: {cell_index}, x: {x}')
                 X.append(x)
-                X_original.append(x_original)
 
         X = torch.tensor(np.array(X), dtype=torch.double).to(device)
-        X_original = torch.tensor(
-            np.array(X_original), dtype=torch.double).to(device)
-        self.x_observations, plane_x_record = prepare_init_pysps_plane(
-            X, X_original, self.f_init, seed=self.seed)
-        self.x_record = plane_x_record
-        print("Done generating the initial plane observations.")
 
-        if src_dir.exists():
-            for p in sorted(src_dir.glob("init*.png")):
-                try:
-                    shutil.copy2(p, OUTPUT_DIR / p.name)
-                except Exception:
-                    pass
+        async def prepare_init_pysps_plane(train_X, f):
+            """Prepare initial observations for the optimization."""
+            yy = []
+            round_id = 0
+            for i in range(train_X.shape[0]):
+                sim_val, image_path = f(
+                    train_X[i].reshape(1, -1).detach().cpu().numpy())
+                yy.append(sim_val)
+                data = Path(image_path).read_bytes()
+                await self._finalize_slot(i, i, data, train_X[i].detach().cpu().numpy(), round_id, 0)
+                round_id += 1
+
+            Y = torch.tensor(yy).double().reshape(-1, 1)
+
+            return (train_X.detach().cpu().numpy(), Y.detach().cpu().numpy())
+
+        self.x_observations = await prepare_init_pysps_plane(X, self.f_init)
+        print("Done generating the initial plane observations.")
 
         print("Warming up GPU pool...")
         self._warmup_gpu_pool()
@@ -790,6 +775,9 @@ class Engine:
             self.last_past_indices = []
 
         print(f'self.train_X: {self.train_X}')
+        debug_indx = self.x_record[img_name][1]
+        print(
+            f'Selected: {self.train_X[debug_indx]}, score: {self.Y[debug_indx]}')
 
         ranked_indices = [
             self.x_record[Path(img_name).name][1] for img_name in selection_basenames]
@@ -800,13 +788,11 @@ class Engine:
         x_center = self.plane.get_center()
         print(f'x_center: {x_center}')
         new_X = []
-        new_X_original = []
         for i in range(self.pysps_num_candidates):
             for j in range(self.pysps_num_candidates):
                 cell_index = (i - self.pysps_radius, j - self.pysps_radius)
                 x = self.plane.calc_grid_parameters(
                     cell_index, self.pysps_num_candidates, 0.5, [])
-                x_original = x.copy()
 
                 print(f'Cell index: {cell_index}, x before clipping: {x}')
 
@@ -826,13 +812,11 @@ class Engine:
                     x = np.clip(x, 0.0, 1.0)
                     print(f'Clipping x: {x_0} (centered at {x_center}) to {x}')
                 new_X.append(x)
-                new_X_original.append(x_original)
 
         new_x = torch.tensor(np.array(new_X), dtype=torch.double).to(device)
-        new_x_original = torch.tensor(
-            np.array(new_X_original), dtype=torch.double).to(device)
         new_I = [self.train_X.shape[0] +
                  i for i in range(self.pysps_num_candidates**2)]
+        self.train_X = torch.cat([self.train_X, new_x], dim=0)
 
         # --- slider setup ---
         n = min(limit or self.num_observations_per_step + 1,
@@ -911,7 +895,8 @@ def _require_engine() -> Engine:
 app.mount("/static", StaticFiles(directory="gallery"), name="static")
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 app.mount("/slots", StaticFiles(directory=str(SLOTS_DIR)), name="slots")
-app.mount("/description", StaticFiles(directory=str(DESCRIPTION_DIR)), name="description")
+app.mount("/description", StaticFiles(directory=str(DESCRIPTION_DIR)),
+          name="description")
 app.mount("/tutorial", StaticFiles(directory=str(TUTORIAL_DIR)), name="tutorial")
 
 
@@ -1014,9 +999,9 @@ def images() -> JSONResponse:
 
 
 @app.post("/api/start")
-def start() -> JSONResponse:
+async def start() -> JSONResponse:
     eng = _require_engine()
-    eng.start()
+    await eng.start()
     gt_url = eng.get_gt_image_url()
     iteration = int(getattr(eng, "step", 0))
 

@@ -1,3 +1,4 @@
+import asyncio
 import os
 import copy
 import glob
@@ -195,7 +196,7 @@ def prepare_init_obs(num_observations, num_dim, x_range, f, return_best=False,
         n=num_observations, q=1, seed=seed
     ).squeeze(1).double()
     x_record = {}
-    
+
     best_sim_val = -float('inf')
     for i in range(num_observations):
         sim_val, image_path = f(
@@ -205,7 +206,7 @@ def prepare_init_obs(num_observations, num_dim, x_range, f, return_best=False,
         if sim_val > best_sim_val:
             best_sim_val = sim_val
             best_x = train_X[i].detach().cpu().numpy()
-    
+
     if return_best:
         return train_X.detach().cpu().numpy(), x_record, best_x
     else:
@@ -275,22 +276,3 @@ def prepare_init_obs_simplex(num_observations, num_dim, f,
 
     return (train_X.detach().cpu().numpy(), Y.detach().cpu().numpy()), x_record
 
-
-def prepare_init_pysps_plane(train_X, train_X_original, f,
-                             seed=0):
-    """Prepare initial observations for the optimization."""
-    pl.seed_everything(seed)
-
-
-    x_record = {}
-    yy = []
-    for i in range(train_X.shape[0]):
-        sim_val, image_path = f(
-            train_X[i].reshape(1, -1).detach().cpu().numpy())
-        x_record[Path(image_path).name] = (
-            train_X[i].detach().cpu().numpy(), i)
-        yy.append(sim_val)
-
-    Y = torch.tensor(yy).double().reshape(-1, 1)
-
-    return (train_X.detach().cpu().numpy(), Y.detach().cpu().numpy()), x_record
