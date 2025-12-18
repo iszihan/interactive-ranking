@@ -9,30 +9,57 @@
 
 body{
   margin: 0;
-  padding-top: 36px;
-  padding-bottom: 140px; /* leave breathing room for fixed Next button */
+  min-height: 100vh;
+  padding: 24px 32px 48px;
   background: #f4f4f4;
   font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 16px;
+  justify-content: center;
+  color: #1e1e1e;
 }
 
-#source{
+#appLayout{
+  width: min(1300px, 100%);
   display: flex;
-  align-items: center;
+  gap: 40px;
+  align-items: flex-start;
+  justify-content: center;
+}
+
+#leftPane{
+  flex: 0 0 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+#iterationPanel{
+  display: flex;
   justify-content: flex-start;
-  gap: 12px;
-  align-self: stretch;
+}
+
+#rightPane{
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  align-items: center;
+}
+
+#statusRow{
   width: 100%;
-  padding: 0 32px;
-  font-size: 0.95rem;
+  max-width: 560px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
   color: #444;
+  margin: 0 auto;
 }
 
 #status{
-  margin-left: auto;
+  font-size: 0.95rem;
 }
 
 #iterationIndicator{
@@ -44,12 +71,12 @@ body{
   letter-spacing: 0.08em;
   /* text-transform: uppercase; */
   color: #2f55a6;
-  font-size: 1.5em;
+  font-size: 1.2em;
 }
 
 .hidden{ display: none !important; }
 
-#controls{ margin-bottom: 16px; }
+#controls{ margin: 0; }
 
 #controls button,
 #nextWrap button{
@@ -101,20 +128,15 @@ body{
 }
 
 #referenceSection{
-  width: min(92vw, 920px);
-  margin: 0 auto;
-}
-
-#referenceRow{
+  width: 100%;
   display: flex;
-  gap: 18px;
-  justify-content: center;
-  align-items: flex-start;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 24px;
+  align-items: stretch;
 }
 
 .reference-card{
-  flex: 0 0 clamp(240px, 32vw, 360px);
+  width: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -140,22 +162,16 @@ body{
   overflow: hidden;
 }
 #rankSection{
-  width: 95vw;
+  width: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
-}
-
-@media (max-width: 800px){
-  .reference-card{ flex: 1 1 100%; }
-}
-
-#rankSection{
-  margin-top: 4px;
+  gap: 12px;
 }
 
 .rank-labels{
-  width: min(95vw, 1100px);
+  width: 100%;
+  max-width: 560px;
   display: flex;
   justify-content: space-between;
   margin: 0 auto 5px;
@@ -167,12 +183,16 @@ body{
   padding: 0 12px;
 }
 
+.rank-labels.rank-labels-centered{
+  justify-content: center;
+  text-align: center;
+}
+
 .rank-label{
   white-space: nowrap;
 }
 
 .rank-label-left{ color: #009E73; }
-.rank-label-right{ color: #D55E00; }
 
 
 .reference-brick img,
@@ -185,22 +205,31 @@ body{
   border-radius: inherit;
 }
 
-/* fixed bottom bar for Next button */
+/* next button sits below the grid */
 #nextWrap{
-  position: fixed;
-  left: 0; right: 0; bottom: 16px;
+  width: 100%;
+  max-width: 560px;
   display: flex;
   justify-content: center;
   gap: 12px;
   flex-wrap: wrap;
-  pointer-events: none;
+  margin: 16px auto 0;
 }
-#nextWrap button{ pointer-events: auto; }
+
+@media (max-width: 960px){
+  #appLayout{ flex-direction: column; align-items: center; }
+  #leftPane, #rightPane{ width: 100%; }
+  #rightPane{ align-items: stretch; }
+  #statusRow{ justify-content: flex-start; }
+}
 
 /* ---------- gallery (unrelated to ranking) ---------- */
 #gallery{
-  display: flex; flex-wrap: wrap; gap: 10px;
-  max-width: 95vw;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  width: 100%;
+  max-width: 560px;
 }
 #gallery img{
   height: 120px; width: auto; display: block; border-radius: 6px;
@@ -212,8 +241,9 @@ body{
   grid-template-columns: repeat(3, minmax(160px, 1fr));
   grid-auto-rows: 1fr;
   gap: 16px;
-  padding: 12px;
-  max-width: min(1100px, 96vw);
+  padding: 12px 0;
+  width: 100%;
+  max-width: 560px;
   margin: 0 auto;
   align-items: stretch;
   justify-items: stretch;
@@ -233,9 +263,9 @@ body{
 }
 
 .brick.selected{
-  outline: 4px solid #f57c00;
-  outline-offset: -2px;
-  box-shadow: 0 8px 18px rgba(245,124,0,0.35);
+  outline: 6px solid #f57c00;
+  outline-offset: -3px;
+  box-shadow: 0 10px 20px rgba(245,124,0,0.38);
 }
 
 /* image fills the box once loaded */
@@ -279,7 +309,3 @@ body{
 .brick.resetting{ transition: none; }
 
 /* misc */
-#source{
-  position: fixed; top: 10px; right: 10px;
-  font-size: .8em;
-}
