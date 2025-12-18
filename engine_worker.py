@@ -24,6 +24,7 @@ def _get_control_img(path: str | None):
 
 def worker_make_generation(payload: Dict[str, Any]):
   state = payload["state"]
+  w = np.array(payload["w"], dtype=np.float32).reshape(1, -1)
   x = np.array(payload["x"], dtype=np.float32).reshape(1, -1)
 
   def infer_img_func(component_weights, image_path=None, control_img=None):
@@ -41,7 +42,7 @@ def worker_make_generation(payload: Dict[str, Any]):
   sim_val, image_path = obj_sim(
       state["gt_image_path"],
       copy.deepcopy(state["component_weights"]),
-      x,
+      w,
       weight_idx=state.get("weight_idx", 1),
       infer_image_func=infer_img_func,
       output_dir=state["output_dir"],

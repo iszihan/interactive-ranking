@@ -36,6 +36,7 @@
 
   <div id="nextWrap" class="hidden">
     <button id="nextBtn">Next</button>
+    <button id="stageBtn" class="hidden">Start Next Stage</button>
   </div>
 
   <div id="rankSection" class="hidden">
@@ -44,6 +45,27 @@
       <span class="rank-label rank-label-right">Farthest</span>
     </div>
     <div id="container"></div>
+  </div>
+
+  <button id="descriptionToggle" class="description-button" type="button">Task Description</button>
+  <button id="tutorialToggle" class="tutorial-button" type="button">Tutorial</button>
+  <div id="descriptionOverlay" class="description-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="descriptionTitle">
+    <div class="description-content">
+      <div class="description-header">
+        <h2 id="descriptionTitle">Task Description</h2>
+        <button id="descriptionClose" class="description-close" type="button">Close</button>
+      </div>
+      <iframe src="/description/description.html" title="Task instructions" loading="lazy"></iframe>
+    </div>
+  </div>
+  <div id="tutorialOverlay" class="description-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="tutorialTitle">
+    <div class="description-content">
+      <div class="description-header">
+        <h2 id="tutorialTitle">Interface Tutorial</h2>
+        <button id="tutorialClose" class="description-close" type="button">Close</button>
+      </div>
+      <iframe src="/tutorial/tutorial_bo.html" title="Ranking tutorial" loading="lazy"></iframe>
+    </div>
   </div>
 </body>
 </html>

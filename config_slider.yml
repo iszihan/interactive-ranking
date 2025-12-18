@@ -1,7 +1,8 @@
 # config.yml
 
 # Inference GPU setting
-gpu_ids: 0,1
+# gpu_ids: 0,1
+gpu_ids: 0
 # gpu_ids: 0,1,2,3
 
 # How many observations to use for the initial phase

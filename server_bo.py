@@ -13,7 +13,7 @@ import time
 import os
 import yaml
 import copy
-from itertools import combinations
+from itertools import accumulate, combinations
 
 import multiprocessing
 
@@ -62,6 +62,12 @@ SLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 WORKING_DIR = OUTPUT_DIR / "work"
 WORKING_DIR.mkdir(parents=True, exist_ok=True)
+
+DESCRIPTION_DIR = FRONTEND_DIR / "description"
+DESCRIPTION_DIR.mkdir(parents=True, exist_ok=True)
+
+TUTORIAL_DIR = FRONTEND_DIR / "tutorial"
+TUTORIAL_DIR.mkdir(parents=True, exist_ok=True)
 
 STATE_PATH_OVERRIDE: Path | None = None
 STATE_SAVE_PATH_OVERRIDE: Path | None = None
@@ -163,6 +169,7 @@ class Engine:
         self.state_loaded = False
 
         self.step: int = 0
+        self.cur_step: int = 0
         self._events = asyncio.Queue()
 
         self.last_selected_basename = None
@@ -208,6 +215,24 @@ class Engine:
         self.num_observations_per_step = config.get(
             'num_observations_per_step', 5)
 
+        # Stage iterations
+        raw_stage_iterations = config.get('stage_iterations', [])
+        if isinstance(raw_stage_iterations, list):
+            cleaned_stage_iterations: list[int] = []
+            for value in raw_stage_iterations:
+                try:
+                    int_value = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if int_value > 0:
+                    cleaned_stage_iterations.append(int_value)
+            self.stage_iterations = cleaned_stage_iterations
+        else:
+            self.stage_iterations = []
+        self.stage_boundaries = list(
+            accumulate(self.stage_iterations)) if self.stage_iterations else []
+        self.stage_index: int = 0
+
         self.target_dim = config.get('target_dim', 8)
         self.sample_past = config.get('sample_past', 2)
         self.beta = config.get('beta', 9)
@@ -234,8 +259,6 @@ class Engine:
             self.gpu_pool = MultiGPUInferPool(
                 gpu_ids=gpu_ids,
                 module_name="engine_worker")
-
-        pl.seed_everything(self.seed)
 
         # Parse prompt and components
         if '@' in self.gt_config:
@@ -317,12 +340,8 @@ class Engine:
             self.gt_img = load_image(self.gt_image_path)  # .to(device)
             print(f"Loaded GT image from {self.gt_image_path}")
 
-        def f(x): return obj_sim(self.gt_image_path, self.component_weights, x, weight_idx=1,
-                                 infer_image_func=self.infer_img_func,
-                                 output_dir=OUTPUT_DIR, to_vis=True, is_init=False, control_img=self.control_img)
-
-        self.f = f
         self.worker_state_template = self._make_worker_state_template()
+        self.clear_outputs()
 
     def infer_img_func(self, component_weights, image_path=None, control_img=None):
         return infer_image_img2img(component_weights,
@@ -345,19 +364,87 @@ class Engine:
             image_path=image_path)[0]
 
     def _reset_runtime_state(self) -> None:
+        self.stage_index = 0
         self.x_record = {}
         self.x_observations = None
         self.train_X = None
         self.Y = None
+        
         self.path = []
-        self.path_train_X = None
-        self.path_Y = None
+
+        self.train_dataset_history: list[dict] = []
+        self.train_dataset_version: int = 0
+
         self.num_warmup = 0
         self.MC_SAMPLES = 0
-        self.I = []
         self.last_past_indices = []
         self.ranking_history: list[dict] = []
         self.last_round_context: dict | None = None
+
+    def _archive_current_train_dataset(self, reason: str | None = None) -> None:
+        """Persist the active train_X/Y tensors before rebuilding them."""
+        if self.train_X is None or self.Y is None:
+            return
+        snapshot = {
+            "version": int(self.train_dataset_version),
+            "stage_index": int(self.stage_index),
+            "step": int(self.step),
+            "reason": reason,
+            "train_X": self.train_X.detach().cpu().clone(),
+            "Y": self.Y.detach().cpu().clone(),
+            "lora_merge_indices": [int(i) for i in getattr(self, "lora_merge_indices", [])],
+            "lora_merge_weights": [float(w) for w in getattr(self, "lora_merge_weights", [])],
+            "dim_index_per_lora": [int(i) for i in getattr(self, "dim_index_per_lora", [])],
+        }
+        self.train_dataset_history.append(snapshot)
+
+    def _begin_new_train_dataset_version(self) -> None:
+        self.train_dataset_version += 1
+
+    def is_stage_ready(self) -> bool:
+        if not self.stage_boundaries:
+            return False
+        if self.stage_index < 0:
+            return False
+        if self.stage_index >= len(self.stage_boundaries):
+            return False
+        target_step = self.stage_boundaries[self.stage_index]
+        return int(self.step) >= int(target_step)
+
+    def stage_status(self) -> dict:
+        boundaries = list(self.stage_boundaries)
+        has_stages = bool(boundaries)
+        total_stages = len(boundaries) + 1 if has_stages else 1
+        clamped_index = max(0, min(self.stage_index, len(boundaries)))
+        current_stage = clamped_index + 1
+        ready = bool(
+            has_stages and clamped_index < len(boundaries) and int(self.step) >= int(boundaries[clamped_index]))
+        next_stage_number = current_stage + \
+            1 if clamped_index < len(boundaries) else None
+        next_stage_step = boundaries[clamped_index] if clamped_index < len(
+            boundaries) else None
+        remaining = None
+        if next_stage_step is not None:
+            remaining = max(0, int(next_stage_step) - int(self.step))
+        return {
+            "iterations": list(self.stage_iterations),
+            "boundaries": boundaries,
+            "currentStage": int(current_stage),
+            "totalStages": int(total_stages),
+            "nextStageReady": bool(ready),
+            "nextStageNumber": int(next_stage_number) if next_stage_number is not None else None,
+            "nextStageStep": int(next_stage_step) if next_stage_step is not None else None,
+            "remainingInStage": int(remaining) if remaining is not None else None,
+            "stageIndex": int(clamped_index),
+            "step": int(self.step),
+            "hasStages": has_stages,
+        }
+
+    async def emit_stage_update(self) -> None:
+        await self._events.put(("stage", {
+            "stage": self.stage_status(),
+            "images": _list_image_urls(),
+        }))
 
     def _make_worker_state_template(self) -> dict:
         return {
@@ -427,10 +514,19 @@ class Engine:
             return False
 
     def _build_worker_payload(self, x_vector: np.ndarray) -> dict:
+        lora_dim = len(self.component_weights)
+        w_full = np.zeros(lora_dim)
+        # Scale each LoRA by its parent dimension's scalar weight
+        w_vec = x_vector.reshape(-1)
+        scale = w_vec[np.asarray(self.dim_index_per_lora, dtype=int)]
+        w_full[self.lora_merge_indices] = np.asarray(
+            self.lora_merge_weights) * scale
+
         state = copy.deepcopy(self.worker_state_template or {})
         return {
             "state": state,
             "x": x_vector.tolist(),
+            "w": w_full.tolist(),
         }
 
     def _warmup_gpu_pool(self) -> None:
@@ -473,17 +569,18 @@ class Engine:
 
         self._pool_warmed = True
 
-    async def _finalize_slot(self, slot_idx: int, idx: int, data: bytes, x_vector: np.ndarray, round_id: int, iteration: int):
+    async def _finalize_slot(self, slot_idx: int, idx: int, data: bytes, x_vector: np.ndarray, round_id: int, iteration: int, *, emit_events: bool = True):
         out_path = SLOTS_DIR / f"slot-{slot_idx}.png"
         await asyncio.to_thread(out_path.write_bytes, data)
-        await self._events.put(("slot", {
-            "round": round_id,
-            "slot": slot_idx,
-            "iteration": int(iteration),
-        }))
+        if emit_events:
+            await self._events.put(("slot", {
+                "round": round_id,
+                "slot": slot_idx,
+                "iteration": int(iteration),
+            }))
         self.x_record[out_path.name] = (x_vector, int(idx))
 
-    async def _generate_with_pool(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int):
+    async def _generate_with_pool(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int, *, emit_events: bool = True):
         pending: dict[int, tuple[int, int]] = {}
         for i in range(new_x.shape[0]):
             x_trial = new_x[i]
@@ -505,9 +602,9 @@ class Engine:
                 data = data.tobytes()
             x_vec = np.array(result["x"], dtype=np.float64)
             new_y[slot_idx] = float(result["sim_val"])
-            await self._finalize_slot(slot_idx, idx, data, x_vec, round_id, iteration)
+            await self._finalize_slot(slot_idx, idx, data, x_vec, round_id, iteration, emit_events=emit_events)
 
-    async def _generate_in_process(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int):
+    async def _generate_in_process(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int, *, emit_events: bool = True):
         for i in range(new_x.shape[0]):
             x_trial = new_x[i]
             if isinstance(x_trial, torch.Tensor):
@@ -515,7 +612,7 @@ class Engine:
             idx = new_I[i]
             data, x_vec, y = await asyncio.to_thread(_make_generation, self, x_trial)
             new_y[i] = float(np.asarray(y).flatten()[0])
-            await self._finalize_slot(i, idx, data, x_vec, round_id, iteration)
+            await self._finalize_slot(i, idx, data, x_vec, round_id, iteration, emit_events=emit_events)
 
     async def recall_last_round(self, *, emit_events: bool = False) -> bool:
         ctx = self.last_round_context or {}
@@ -530,7 +627,8 @@ class Engine:
             print("Incomplete round context; cannot recall generation.")
             return False
 
-        new_x_tensor = torch.tensor(new_x_payload, dtype=torch.double).to(device)
+        new_x_tensor = torch.tensor(
+            new_x_payload, dtype=torch.double).to(device)
         new_I_list = [int(i) for i in new_I]
         n = int(ctx.get("n", new_x_tensor.shape[0]))
 
@@ -597,7 +695,10 @@ class Engine:
         print("Cleared outputs.")
 
     def start(self) -> None:
+        pl.seed_everything(self.seed)
+
         self.step = 0
+        self.cur_step = 0
         self.last_selected_basename = None
         self._reset_runtime_state()
 
@@ -609,7 +710,7 @@ class Engine:
         get_mcmc_from_cache()
 
         self.clear_outputs()
-        
+
         if restored:
             print(f"Restored engine state from {self.state_path}")
             self._warmup_gpu_pool()
@@ -628,12 +729,8 @@ class Engine:
         else:
             src_dir = WORKING_DIR
 
-        def f_init(x):
-            return obj_sim(self.gt_image_path, self.component_weights, x, weight_idx=1,
-                           infer_image_func=self.infer_img_func,
-                           output_dir=src_dir, to_vis=True, is_init=True, control_img=self.control_img)
-
-        self.f_init = f_init
+        self.dim2loras = self.construct_search_space()
+        self.update_search_space(src_dir)
 
         if src_dir.exists():
             for p in sorted(src_dir.glob("init*.png")):
@@ -644,15 +741,253 @@ class Engine:
         self.init_dir = src_dir
         os.makedirs(self.init_dir, exist_ok=True)
 
-        self.x_observations, x_record = prepare_init_obs_simplex(self.num_observations, len(
-            self.component_weights), self.f_init, seed=self.seed, sparse_threshold=0.1, sampler=sample_dirichlet_simplex)
-        self.x_record = x_record
+        self.construct_init_samples()
 
         print("Warming up GPU pool...")
         self._warmup_gpu_pool()
 
         print("Engine started.")
         self.save_state(reason="start")
+
+        pl.seed_everything(self.seed)
+
+    def next_stage_start(self, *, force: bool = False) -> bool:
+        if not self.stage_boundaries:
+            print('No stage iterations configured; skipping next stage request.')
+            return False
+        if not force and not self.is_stage_ready():
+            print('Next stage not ready yet; skipping advance.')
+            return False
+        if self.stage_index >= len(self.stage_boundaries):
+            print('All configured stages have already been started.')
+            return False
+
+        pl.seed_everything(self.seed)
+
+        self._archive_current_train_dataset(
+            reason=f"stage-{self.stage_index}-complete")
+        self._begin_new_train_dataset_version()
+
+        self.stage_index += 1
+        self.cur_step = 0
+        self.last_round_context = None
+
+        self.clear_outputs()
+
+        src_dir = WORKING_DIR
+
+        self.dim2loras = self.construct_search_space()
+        self.update_search_space(src_dir)
+        seed_context = self.construct_init_samples(
+            capture_context=True,
+            context_iteration=int(self.step) + 1,
+        )
+
+        if seed_context:
+            self.last_round_context = seed_context
+
+        pl.seed_everything(self.seed)
+        self.save_state(reason=f'stage-{self.stage_index}')
+        
+        return True
+
+    def construct_search_space(self):
+        # Look at the current train_X and Y to determine which LoRAs are active
+        dim2loras = {
+            i: ([Path(c[0]).stem], 0) for i, c in enumerate(self.component_weights)}
+
+        if self.train_X is None:
+            return dim2loras
+
+        # Pick the x with the largest y
+        y_array = self.Y.detach().cpu().numpy().reshape(-1)
+        best_idx = int(np.argmax(y_array))
+        x_best = self.train_X[best_idx].reshape(-1)
+
+        print(f"x_best: {x_best}")
+        active_dims = (x_best > 0).nonzero(as_tuple=True)[0]
+        inactive_dims = (x_best == 0).nonzero(as_tuple=True)[0]
+
+        print(
+            f"Active dimensions: {active_dims}, Inactive dimensions: {inactive_dims}")
+
+        dim2loras = {d: loras for d, loras in dim2loras.items()
+                     if d in active_dims.tolist()}
+
+        # Filter train_X and Y to only keep rows whose non-zero dims match active_dims
+        train_X2 = self.train_X[torch.all(
+            self.train_X[:, inactive_dims] == 0, dim=1), :]
+        train_X2 = train_X2[:, active_dims]
+        Y2 = self.Y[torch.all(self.train_X[:, inactive_dims] == 0, dim=1), :]
+
+        sorted_indices = Y2.flatten().argsort(descending=True).squeeze()
+        train_X2 = train_X2[sorted_indices, :]
+        Y2 = Y2[sorted_indices, :]
+
+        if len(train_X2.shape) == 1:
+            train_X2 = train_X2.reshape(1, -1)
+        if len(Y2.shape) == 1:
+            Y2 = Y2.reshape(1, -1)
+
+        self.train_X = train_X2
+        self.Y = Y2
+
+        return dim2loras
+
+    def construct_init_samples(self, *, capture_context: bool = False, context_iteration: int | None = None):
+        inf_f = self.f_init if self.train_X is None else self.f
+        self.x_observations, x_record = prepare_init_obs_simplex(self.num_observations, len(
+            self.dim2loras), inf_f, seed=self.seed, sparse_threshold=0.1, sampler=sample_dirichlet_simplex)
+        seed_context: dict | None = None
+        context_iteration_value = context_iteration if context_iteration is not None else int(self.step)
+
+        # Reuse the existing train_X and Y if available
+        if self.train_X is not None and self.Y is not None:
+            assert self.train_X.shape[0] == self.Y.shape[0]
+            dist_threshold = 0.05
+            init_observations2 = [self.train_X[0]]
+            init_y2 = [self.Y[0]]
+            for i in range(1, self.train_X.shape[0]):
+                if len(init_observations2) >= self.max_num_observations/2:
+                    break
+                obs = self.train_X[i]
+                if not any(torch.norm(obs - o) < dist_threshold for o in init_observations2):
+                    init_observations2.append(obs)
+                    init_y2.append(self.Y[i])
+                else:
+                    print(
+                        f"Skipping observation {obs} as it is too close to existing ones.")
+
+            x_observations2 = self.x_observations[0]
+            y_observations2 = self.x_observations[1]
+            for i in range(len(x_observations2)):
+                sample = torch.from_numpy(
+                    x_observations2[i]).double().to(device)
+                y = torch.from_numpy(y_observations2[i]).double().to(device)
+                if not any(torch.norm(sample - o) < dist_threshold for o in init_observations2):
+                    init_observations2.append(sample)
+                    init_y2.append(y)
+                else:
+                    print(
+                        f"Skipping observation {sample} as it is too close to existing ones.")
+
+            init_observations2 = torch.stack(init_observations2).double()
+            y_observations2 = torch.tensor(
+                init_y2).double().reshape(-1, 1).to(device)
+            self.x_observations = (init_observations2.detach().cpu(
+            ).numpy(), y_observations2.detach().cpu().numpy())
+
+            self.x_record = {}
+
+            async def _seed_initial_slots() -> dict | None:
+                new_y = [0.0 for _ in range(init_observations2.shape[0])]
+                new_I = list(range(init_observations2.shape[0]))
+                round_id = int(time.time() * 1000)
+                iteration = int(context_iteration_value)
+                if self.gpu_pool:
+                    if not self._pool_warmed:
+                        self._warmup_gpu_pool()
+                    await self._generate_with_pool(init_observations2, new_I, new_y, round_id, iteration, emit_events=False)
+                else:
+                    await self._generate_in_process(init_observations2, new_I, new_y, round_id, iteration, emit_events=False)
+                return {
+                    "round": int(round_id),
+                    "n": int(init_observations2.shape[0]),
+                    "iteration": int(iteration),
+                    "new_x": init_observations2.detach().cpu().tolist(),
+                    "new_I": [int(i) for i in new_I],
+                    "new_y": [float(val) for val in new_y],
+                }
+
+            seed_context = asyncio.run(_seed_initial_slots())
+
+            print(f'In construct_init_samples: {self.x_record}')
+        else:
+            self.x_record = x_record
+        if capture_context and seed_context:
+            seed_context.setdefault("ranking", [])
+            seed_context.setdefault("timestamp", time.time())
+            seed_context.setdefault("step", int(self.step))
+            seed_context.setdefault("stage_seed", True)
+        else:
+            seed_context = None if not capture_context else seed_context
+            
+        train_X, Y = self.x_observations
+        self.train_X = torch.from_numpy(train_X).double().to(device)
+        self.Y = torch.from_numpy(Y).double().to(device)
+            
+        return seed_context
+
+    def update_search_space(self, init_src_dir):
+        lora2canon_dim = {
+            Path(c[0]).stem: i for i, c in enumerate(self.component_weights)}
+
+        lora_dim = len(lora2canon_dim)
+        self.lora_merge_indices = []
+        self.lora_merge_weights = []
+        dim_sorted = sorted(self.dim2loras.keys())
+        print(f'lora2canon_dim: {lora2canon_dim}')
+
+        for dim in dim_sorted:
+            loras = self.dim2loras[dim][0]
+            if len(loras) == 0:
+                continue
+            # All ones:
+            weights = [1.0 for _ in loras]
+            print(f'loras: {loras}, weight: {weights}')
+            self.lora_merge_indices += [lora2canon_dim[lora] for lora in loras]
+            self.lora_merge_weights += weights
+
+        print(f'lora_merge_indices: {self.lora_merge_indices}')
+        print(f'lora_merge_weights: {self.lora_merge_weights}')
+        # exit()
+
+        # Map each flattened LoRA entry to its dimension index (in dim_sorted order)
+        self.dim_index_per_lora: list[int] = []
+        for d_idx, dim in enumerate(dim_sorted):
+            self.dim_index_per_lora.extend(
+                [d_idx] * len(self.dim2loras[dim][0]))
+
+        def f_init_full(x):
+            return obj_sim(self.gt_image_path, self.component_weights, x, weight_idx=1,
+                           infer_image_func=self.infer_img_func,
+                           output_dir=init_src_dir, to_vis=True, is_init=True, control_img=self.control_img)
+
+        def f_init(w):
+            w_full = np.zeros(lora_dim)
+            # Scale each LoRA by its parent dimension's scalar weight
+            w_vec = w.reshape(-1)
+            scale = w_vec[np.asarray(self.dim_index_per_lora, dtype=int)]
+            w_full[self.lora_merge_indices] = np.asarray(
+                self.lora_merge_weights) * scale
+            print(
+                f'Merging weights: {self.lora_merge_indices} -> {self.lora_merge_weights}')
+            print(f'Scaling factors: {scale}')
+            print(f'f_init_extended: {w} -> {w_full}')
+            # exit()
+            return f_init_full(w_full.reshape(1, -1))
+
+        self.f_init = f_init
+
+        def f_full(x): return obj_sim(self.gt_image_path, self.component_weights, x, weight_idx=1,
+                                      infer_image_func=self.infer_img_func,
+                                      output_dir=OUTPUT_DIR, to_vis=True, is_init=False, control_img=self.control_img)
+
+        def f(w):
+            w_full = np.zeros(lora_dim)
+            # Scale each LoRA by its parent dimension's scalar weight
+            w_vec = w.reshape(-1)
+            scale = w_vec[np.asarray(self.dim_index_per_lora, dtype=int)]
+            w_full[self.lora_merge_indices] = np.asarray(
+                self.lora_merge_weights) * scale
+            print(
+                f'Merging weights: {self.lora_merge_indices} -> {self.lora_merge_weights}')
+            print(f'Scaling factors: {scale}')
+            print(f'f_extended: {w} -> {w_full}')
+            # exit()
+            return f_full(w_full.reshape(1, -1))
+
+        self.f = f
 
     def build_tree(self):
         # Build LoRA tree
@@ -801,19 +1136,11 @@ class Engine:
         self.clear_outputs()
 
         # --- init / feedback ---
-        if self.step == 0:
-            pl.seed_everything(self.seed)
-
+        if self.cur_step == 0:
             train_X, Y = self.x_observations
-            self.train_X = torch.from_numpy(train_X).double().to(device)
-            self.Y = torch.from_numpy(Y).double().to(device)
 
             self.num_warmup = train_X.shape[0]
             self.MC_SAMPLES = 256
-            self.path_train_X = self.train_X.clone()
-            self.path_Y = self.Y.clone()
-            self.path = []
-            self.I = [0 for _ in range(self.train_X.shape[0])]
 
             self.last_past_indices = []
 
@@ -878,6 +1205,7 @@ class Engine:
             "indices": [int(x) for x in ranked_indices],
             "selected": self.last_selected_basename,
             "saved_at": time.time(),
+            "train_version": int(self.train_dataset_version),
         })
 
         ctx_new_x = new_x.detach().cpu().tolist()
@@ -897,6 +1225,7 @@ class Engine:
             "round": round_id,
             "n": n,
             "iteration": int(iteration),
+            "stage": self.stage_status(),
         }))
 
         # Iterate and generate each slot given new_x
@@ -907,20 +1236,23 @@ class Engine:
             await self._generate_in_process(new_x, new_I, new_y, round_id, iteration)
         new_y_results = list(new_y)
         if self.last_round_context is not None:
-            self.last_round_context["new_y"] = [float(val) for val in new_y_results]
+            self.last_round_context["new_y"] = [
+                float(val) for val in new_y_results]
 
         feedback_values = new_y_results[1::]
         self.Y = torch.cat([self.Y, torch.from_numpy(
             np.array(feedback_values).reshape(-1, 1)).double().to(device)], dim=0)
 
         # Tell clients the round finished
+        self.step += 1
+        self.cur_step += 1
+        self.save_state(reason=f"step-{self.step}")
+
         await self._events.put(("done", {
             "round": round_id,
             "iteration": int(iteration),
-        }))  # <-- await
-
-        self.step += 1
-        self.save_state(reason=f"step-{self.step}")
+            "stage": self.stage_status(),
+        }))
 
 
 engine: Engine | None = None
@@ -933,6 +1265,8 @@ def _require_engine() -> Engine:
 
 
 app.mount("/static", StaticFiles(directory="."), name="static")
+app.mount("/description", StaticFiles(directory=str(DESCRIPTION_DIR)), name="description")
+app.mount("/tutorial", StaticFiles(directory=str(TUTORIAL_DIR)), name="tutorial")
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 app.mount("/slots", StaticFiles(directory=str(SLOTS_DIR)), name="slots")
 
@@ -1050,6 +1384,7 @@ def start() -> JSONResponse:
                 "images": images,
                 "gt_image": gt_url,
                 "iteration": iteration,
+                "stage": eng.stage_status(),
             }, headers={"Cache-Control": "no-store"})
         time.sleep(0.2)  # small sleep to avoid busy-wait
 
@@ -1059,12 +1394,17 @@ def start() -> JSONResponse:
         "images": [],
         "gt_image": gt_url,
         "iteration": iteration,
+        "stage": eng.stage_status(),
     }, status_code=202)
 
 
 class NextRequest(BaseModel):
     ranking: List[str]
     n: Optional[int] = None
+
+
+class StageAdvanceRequest(BaseModel):
+    force: bool = False
 
 
 # helper: get "foo.png" from any string, ignore blob:
@@ -1113,6 +1453,46 @@ async def next_step(req: NextRequest) -> JSONResponse:
         "accepted_ranking": basenames,
         "selected_basename": getattr(eng, "last_selected_basename", None),
     })
+
+
+@app.get("/api/stage/status")
+async def api_stage_status() -> JSONResponse:
+    eng = _require_engine()
+    return JSONResponse({
+        "stage": eng.stage_status(),
+        "images": _list_image_urls(),
+    })
+
+
+@app.post("/api/stage/next")
+async def api_stage_next(req: StageAdvanceRequest | None = None) -> JSONResponse:
+    eng = _require_engine()
+    force_flag = bool(getattr(req, "force", False)) if req else False
+    advanced = await asyncio.to_thread(eng.next_stage_start, force=force_flag)
+    if advanced:
+        await eng.emit_stage_update()
+
+    reason = None
+    if not advanced:
+        if not eng.stage_boundaries:
+            reason = "no-stages"
+        elif eng.stage_index >= len(eng.stage_boundaries):
+            reason = "completed"
+        elif not eng.is_stage_ready():
+            reason = "not-ready"
+        else:
+            reason = "blocked"
+
+    payload = {
+        "advanced": bool(advanced),
+        "stage": eng.stage_status(),
+        "images": _list_image_urls(),
+    }
+    if reason:
+        payload["reason"] = reason
+
+    status_code = 200 if advanced else 409
+    return JSONResponse(payload, status_code=status_code)
 
 
 @app.get("/api/events")

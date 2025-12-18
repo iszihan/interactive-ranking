@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<title>Task Description</title>
+	<style>
+		:root{
+			color-scheme: light;
+		}
+		body{
+			margin: 0;
+			font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+			background: #f7f8fb;
+			color: #1c1f2a;
+		}
+		.wrapper{
+			/* max-width: 1100px; */
+            max-width: 1800px;
+			margin: 0 auto;
+			padding: 36px clamp(18px, 4vw, 48px) 48px;
+		}
+		h1{
+			margin: 0 0 18px;
+			font-size: clamp(1.4rem, 2.6vw, 2rem);
+			letter-spacing: 0.04em;
+			text-transform: uppercase;
+			color: #343a6f;
+		}
+		p{
+			margin: 0 0 14px;
+			line-height: 1.6;
+			font-size: 1rem;
+		}
+		.emphasis{
+			font-weight: 600;
+			color: #1c4173;
+		}
+		.examples{
+			margin-top: 32px;
+		}
+		.text-strong{
+			font-weight: 700;
+			color: #11183a;
+		}
+		.legend{
+			display: grid;
+			grid-template-columns: repeat(3, minmax(0, 1fr));
+			gap: 12px;
+			font-size: 0.9rem;
+			font-weight: 600;
+			text-transform: uppercase;
+			letter-spacing: 0.08em;
+			color: #4a4f80;
+			text-align: center;
+		}
+		.grid{
+			margin-top: 12px;
+			display: grid;
+			grid-template-columns: repeat(3, minmax(0, 1fr));
+			gap: 18px;
+		}
+		@media (max-width: 720px){
+			.legend{
+				grid-template-columns: 1fr;
+				text-align: left;
+			}
+			.grid{
+				grid-template-columns: 1fr;
+			}
+		}
+		.hidden{
+			display: none !important;
+		}
+		figure{
+			margin: 0;
+			background: #fff;
+			border-radius: 16px;
+			padding: 12px 12px 18px;
+			box-shadow: 0 12px 30px rgba(20, 23, 50, 0.08);
+			display: flex;
+			flex-direction: column;
+			gap: 10px;
+			position: relative;
+			overflow: visible;
+			cursor: zoom-in;
+		}
+		figure img{
+			width: 100%;
+			border-radius: 12px;
+			display: block;
+			background: #f2f3ff;
+			object-fit: cover;
+			transition: transform 0.18s ease, box-shadow 0.18s ease;
+		}
+		figure:hover img,
+		figure:focus-within img{
+			transform: translateY(-3px) scale(1.02);
+			box-shadow: 0 16px 32px rgba(20, 23, 50, 0.18);
+		}
+		figcaption{
+			text-align: center;
+			font-size: 0.85rem;
+			letter-spacing: 0.05em;
+			text-transform: uppercase;
+			color: #5a5f87;
+		}
+		.zoom-preview{
+			position: fixed;
+			inset: auto auto;
+			width: min(90vw, 90vh, 1024px);
+			border-radius: 18px;
+			background: #fff;
+			box-shadow: 0 32px 90px rgba(10, 12, 32, 0.38);
+			padding: 16px;
+			z-index: 2000;
+			pointer-events: none;
+			transition: opacity 0.15s ease;
+			aspect-ratio: 1 / 1;
+		}
+		.zoom-preview.hidden{
+			opacity: 0;
+		}
+		.zoom-preview img{
+			width: 100%;
+			height: 100%;
+			display: block;
+			border-radius: 12px;
+			object-fit: contain;
+		}
+	</style>
+</head>
+<body>
+	<div class="wrapper">
+		<p>In this study, we will ask you to compare a <span class="text-strong">reference image</span> against several <span class="text-strong">candidate images</span>.</p>
+		<p>Your task is to judge how visually similar each candidate is to the reference, and provide feedback based on your judgment.</p>
+		<p>Please focus on overall visual appearance and style, NOT on image content (e.g., pose, composition, subject structure) or visual errors (e.g., incorrect anatomy), and do NOT base your decision on personal preference or taste.</p>
+		<p>The following examples illustrate what it means for an image to appear closer to or farther from a reference.</p>
+		<p class="emphasis">Please take your time to review each example carefully before proceeding. You can hover to zoom in.</p>
+
+		<section class="examples" aria-label="Example comparisons">
+			<div class="legend" aria-hidden="true">
+				<span>Reference</span>
+				<span>Closer match</span>
+				<span>Farther match</span>
+			</div>
+			<div class="grid">
+				<figure>
+					<img src="/description/ref01.png" alt="Reference example 1" />
+					<figcaption>Reference &middot; Example 1</figcaption>
+				</figure>
+				<figure>
+					<img src="/description/close01.png" alt="Close match example 1" />
+					<figcaption>Closer match &middot; Example 1</figcaption>
+				</figure>
+				<figure>
+					<img src="/description/far01.png" alt="Farther match example 1" />
+					<figcaption>Farther match &middot; Example 1</figcaption>
+				</figure>
+
+				<figure>
+					<img src="/description/ref02.png" alt="Reference example 2" />
+					<figcaption>Reference &middot; Example 2</figcaption>
+				</figure>
+				<figure>
+					<img src="/description/close02.png" alt="Close match example 2" />
+					<figcaption>Closer match &middot; Example 2</figcaption>
+				</figure>
+				<figure>
+					<img src="/description/far02.png" alt="Farther match example 2" />
+					<figcaption>Farther match &middot; Example 2</figcaption>
+				</figure>
+
+				<figure>
+					<img src="/description/ref03.png" alt="Reference example 3" />
+					<figcaption>Reference &middot; Example 3</figcaption>
+				</figure>
+				<figure>
+					<img src="/description/close03.png" alt="Close match example 3" />
+					<figcaption>Closer match &middot; Example 3</figcaption>
+				</figure>
+				<figure>
+					<img src="/description/far03.png" alt="Farther match example 3" />
+					<figcaption>Farther match &middot; Example 3</figcaption>
+				</figure>
+			</div>
+		</section>
+	</div>
+	<script>
+		(() => {
+			const figures = document.querySelectorAll(".grid figure");
+			if (!figures.length || !matchMedia("(hover: hover)").matches) return;
+			const preview = document.createElement("div");
+			preview.className = "zoom-preview hidden";
+			const previewImg = document.createElement("img");
+			preview.append(previewImg);
+			document.body.append(preview);
+
+			const OFFSET = 24;
+
+			function updatePosition(evt, fallbackRect){
+				const size = Math.min(window.innerWidth * 0.9, window.innerHeight * 0.9, 1024);
+				const width = preview.offsetWidth || size;
+				const height = preview.offsetHeight || size;
+				const pointerX = evt?.clientX ?? fallbackRect?.right ?? window.innerWidth / 2;
+				const pointerY = evt?.clientY ?? fallbackRect?.top ?? window.innerHeight / 2;
+				let left = pointerX + OFFSET;
+				let top = pointerY + OFFSET;
+				if (left + width > window.innerWidth - 12) left = pointerX - width - OFFSET;
+				if (top + height > window.innerHeight - 12) top = pointerY - height - OFFSET;
+				preview.style.left = `${Math.max(12, left)}px`;
+				preview.style.top = `${Math.max(12, top)}px`;
+			}
+
+			function showPreview(fig, evt){
+				const img = fig.querySelector("img");
+				if (!img) return;
+				previewImg.src = img.currentSrc || img.src;
+				previewImg.alt = img.alt;
+				preview.classList.remove("hidden");
+				requestAnimationFrame(() => updatePosition(evt, fig.getBoundingClientRect()));
+			}
+
+			function hidePreview(){
+				preview.classList.add("hidden");
+			}
+
+			figures.forEach((fig) => {
+				fig.tabIndex = 0;
+				fig.addEventListener("mouseenter", (evt) => showPreview(fig, evt));
+				fig.addEventListener("mousemove", (evt) => updatePosition(evt));
+				fig.addEventListener("mouseleave", hidePreview);
+				fig.addEventListener("focus", (evt) => showPreview(fig, evt));
+				fig.addEventListener("blur", hidePreview);
+			});
+		})();
+	</script>
+</body>
+</html>

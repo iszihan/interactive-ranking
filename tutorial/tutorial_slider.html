@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<title>Slider Tutorial</title>
+	<style>
+		:root{
+			color-scheme: light;
+		}
+		body{
+			margin: 0;
+			font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+			background: #f5f6fb;
+			color: #101528;
+		}
+		.wrapper{
+			max-width: 960px;
+			margin: 0 auto;
+			padding: 36px clamp(18px, 4vw, 48px) 48px;
+			display: flex;
+			flex-direction: column;
+			gap: 28px;
+		}
+		h2{
+			margin: 0 0 12px;
+			font-size: clamp(1.25rem, 2.4vw, 1.8rem);
+			color: #252b4d;
+		}
+		p{
+			margin: 0 0 10px;
+			line-height: 1.65;
+		}
+		ul{
+			margin: 0 0 12px 20px;
+			padding: 0;
+			line-height: 1.6;
+		}
+		.section{
+			background: #fff;
+			border-radius: 20px;
+			padding: 24px clamp(18px, 3vw, 32px);
+			box-shadow: 0 20px 50px rgba(15, 20, 48, 0.08);
+		}
+		.section + .section{
+			opacity: 0.97;
+		}
+		.section strong{
+			color: #1d2a66;
+		}
+		.demo-figure{
+			margin: 16px 0 0;
+			border-radius: 18px;
+			overflow: hidden;
+			box-shadow: inset 0 0 0 1px rgba(16, 21, 40, 0.08);
+		}
+		.demo-figure.is-overview{
+			max-width: min(740px, 90%);
+			margin-left: auto;
+			margin-right: auto;
+		}
+		.demo-figure.is-slider{
+			max-width: min(520px, 80%);
+			margin-left: auto;
+			margin-right: auto;
+		}
+		.demo-figure img{
+			width: 100%;
+			display: block;
+		}
+		hr{
+			border: none;
+			border-top: 1px solid #e2e6f2;
+			margin: 32px 0;
+		}
+		.footer-note{
+			text-align: center;
+			font-weight: 600;
+			color: #37406b;
+		}
+	</style>
+</head>
+<body>
+	<div class="wrapper">
+		<section class="section">
+			<h2>1. Interface Overview</h2>
+			<p>The interface allows you to generate images by adjusting a set of mixture weights and comparing the result to a reference image.</p>
+			<div class="demo-figure is-overview">
+				<img src="overview_slider.jpg" alt="Annotated overview of the slider interface" loading="lazy" />
+			</div>
+			<ul>
+				<li>At the <strong>top left</strong>, a counter shows the current iteration number. You may generate up to <strong>20 iterations</strong>.</li>
+				<li>On the <strong>left</strong>, you will see the <strong>reference image</strong> labeled <em>“Match This Image”</em>. This is the image you should aim to match in overall visual appearance and style. The <strong>Latest Render</strong> panel below displays your current work-in-progress image.</li>
+				<li>In the <strong>center</strong>, you will find a set of <strong>sliders</strong>, each corresponding to a different visual component. The thumbnail for each slider previews that component in isolation (<strong>hover to zoom in</strong>).</li>
+				<li>Below the sliders, the <strong>Render Image</strong> button generates a new image based on the current slider settings.</li>
+				<li>On the <strong>right</strong>, the <strong>Recent Renders</strong> panel displays your previous renders and allows you to revisit earlier slider configurations.</li>
+				<li>In the <strong>bottom-right</strong> corner, the task description and this interface tutorial are available at any time.</li>
+			</ul>
+		</section>
+
+		<section class="section">
+			<h2>2. Slider Manipulation and Rendering</h2>
+			<p>Each slider controls the contribution of one visual component to the generated image.</p>
+			<ul>
+				<li>Use the thumbnail previews to view each slider's effect in isolation (hover to zoom in).</li>
+				<li>Adjust a slider by dragging it left or right, or by entering a numeric value directly.</li>
+				<li>Higher values increase the influence of that component, while lower values reduce it.</li>
+				<li>You may adjust one or multiple sliders at a time.</li>
+				<li>After adjusting the sliders, click <strong>Render Image</strong> to generate a new candidate image.</li>
+				<li>The generated image will appear in the <strong>Latest Render</strong> panel.</li>
+			</ul>
+			<p>You may generate up to <strong>20 iterations</strong> while exploring different combinations.</p>
+			<div class="demo-figure is-slider">
+				<img src="slider_panel.gif" alt="Animation showing slider adjustments and rendering" loading="lazy" />
+			</div>
+		</section>
+
+		<section class="section">
+			<h2>3. History and Re-loading Previous Renders</h2>
+			<p>The <strong>Recent Renders</strong> panel keeps track of your past renders.</p>
+			<ul>
+				<li>Each entry shows the time and a brief summary of the slider settings.</li>
+				<li>Clicking an entry will <strong>restore the sliders</strong> to the values used for that render and display the corresponding image as the current work-in-progress in the <strong>Latest Render</strong> panel.</li>
+				<li>This allows you to compare different attempts, revisit promising configurations, or refine a previous result.</li>
+			</ul>
+			<p>The history panel is intended to support exploration and iteration.</p>
+			<div class="demo-figure">
+				<img src="history_panel.gif" alt="Animation demonstrating the recent renders panel" loading="lazy" />
+			</div>
+		</section>
+
+		<section class="section">
+			<h2>4. Instructions</h2>
+			<p>The task description and this interface tutorial are available at any time.</p>
+			<p>To access them, click the buttons located in the <strong>bottom-right corner</strong> of the interface.</p>
+		</section>
+
+		<p class="footer-note">Use this tutorial as a guide whenever you need a refresher.</p>
+	</div>
+</body>
+</html>

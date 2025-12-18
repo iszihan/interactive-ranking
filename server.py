@@ -37,6 +37,9 @@ SLOTS_DIR.mkdir(parents=True, exist_ok=True)
 WORKING_DIR = OUTPUT_DIR / "work"
 WORKING_DIR.mkdir(parents=True, exist_ok=True)
 
+DESCRIPTION_DIR = FRONTEND_DIR / "description"
+DESCRIPTION_DIR.mkdir(parents=True, exist_ok=True)
+
 app = FastAPI()
 
 # helpers ------------------------------------------------------------
@@ -324,6 +327,7 @@ class Engine:
 engine = Engine(CONFIG_FILE, OUTPUT_DIR)
 
 app.mount("/static", StaticFiles(directory="."), name="static")
+app.mount("/description", StaticFiles(directory=str(DESCRIPTION_DIR)), name="description")
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 app.mount("/slots", StaticFiles(directory=str(SLOTS_DIR)), name="slots")
 

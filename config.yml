@@ -39,3 +39,10 @@ alpha_config: '/scratch/ondemand29/chenxil/code/mood-board/search_benchmark/ld_e
 
 # Example image path
 example_path: '/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/'
+
+# Stage iterations
+# self.stage_iterations = config.get('stage_iterations', [5, 5])
+stage_iterations:
+  - 2
+  - 3
+
