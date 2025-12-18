@@ -1,0 +1,75 @@
+<!DOCTYPE HTML>
+<html lang="en">
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href=/static/style.css>
+  <script src="/static/script.js" defer></script>
+</head>
+<body>
+  <div id="appLayout">
+    <aside id="leftPane">
+      <div id="iterationPanel">
+        <span id="iterationIndicator" class="iteration hidden"></span>
+      </div>
+      <div id="referenceSection" class="hidden">
+        <div class="reference-card">
+          <div class="reference-label">Match this image:</div>
+          <div class="reference-brick">
+            <img id="referenceImg" alt="Target reference" />
+          </div>
+        </div>
+        <div id="zoomSection" class="reference-card hidden">
+          <div class="zoom-label">Selected image:</div>
+          <div class="zoom-brick">
+            <img id="zoomImg" alt="Zoomed selection" />
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <section id="rightPane">
+      <div id="statusRow">
+        <span id="status"></span>
+        <div id="controls">
+          <button id="startBtn">Start</button>
+        </div>
+      </div>
+
+      <div id="gallery" class="hidden"></div>
+
+      <div id="rankSection" class="hidden">
+        <div class="rank-labels rank-labels-centered">
+          <span class="rank-label rank-label-left">Pick the best match</span>
+        </div>
+        <div id="container"></div>
+      </div>
+
+      <div id="nextWrap" class="hidden">
+        <button id="nextBtn">Next</button>
+        <button id="stageBtn" class="hidden">Start Next Stage</button>
+      </div>
+    </section>
+  </div>
+
+  <button id="descriptionToggle" class="description-button" type="button">Task Description</button>
+  <button id="tutorialToggle" class="tutorial-button" type="button">Tutorial</button>
+  <div id="descriptionOverlay" class="description-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="descriptionTitle">
+    <div class="description-content">
+      <div class="description-header">
+        <h2 id="descriptionTitle">Task Description</h2>
+        <button id="descriptionClose" class="description-close" type="button">Close</button>
+      </div>
+      <iframe src="/description/description.html" title="Task instructions" loading="lazy"></iframe>
+    </div>
+  </div>
+  <div id="tutorialOverlay" class="description-overlay tutorial-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="tutorialTitle">
+    <div class="description-content tutorial-content">
+      <div class="description-header">
+        <h2 id="tutorialTitle">Interface Tutorial</h2>
+        <button id="tutorialClose" class="description-close" type="button">Close</button>
+      </div>
+      <iframe src="/tutorial/tutorial_gallery.html" title="Gallery tutorial" loading="lazy"></iframe>
+    </div>
+  </div>
+</body>
+</html>

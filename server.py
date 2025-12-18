@@ -323,7 +323,6 @@ class Engine:
 
         self.step += 1
 
-
 engine = Engine(CONFIG_FILE, OUTPUT_DIR)
 
 app.mount("/static", StaticFiles(directory="."), name="static")

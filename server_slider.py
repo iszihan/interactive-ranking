@@ -674,7 +674,6 @@ class Engine:
 
 engine: Engine | None = None
 
-
 def _require_engine() -> Engine:
     if engine is None:
         raise RuntimeError("Engine is not initialized in this process.")

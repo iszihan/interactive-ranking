@@ -52,8 +52,11 @@ def worker_make_generation(payload: Dict[str, Any]):
   )
 
   data = Path(image_path).read_bytes()
-  return {
+  output = {
       "data": data,
       "x": x.flatten().tolist(),
       "sim_val": float(np.asarray(sim_val).flatten()[0]),
   }
+  if 'x_pysps' in payload:
+    output['x_pysps'] = payload['x_pysps']
+  return output

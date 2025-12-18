@@ -1,3 +1,4 @@
+import asyncio
 import os
 import copy
 import glob
@@ -185,7 +186,7 @@ def obj_sim(gt_img_path, component_weights, x, weight_idx, infer_image_func,
     return sim_val, image_path
 
 
-def prepare_init_obs(num_observations, num_dim, x_range, f,
+def prepare_init_obs(num_observations, num_dim, x_range, f, return_best=False,
                      seed=0):
     """Prepare initial observations for the optimization."""
     pl.seed_everything(seed)
@@ -195,13 +196,21 @@ def prepare_init_obs(num_observations, num_dim, x_range, f,
         n=num_observations, q=1, seed=seed
     ).squeeze(1).double()
     x_record = {}
+
+    best_sim_val = -float('inf')
     for i in range(num_observations):
         sim_val, image_path = f(
             train_X[i].reshape(1, -1).detach().cpu().numpy())
         x_record[Path(image_path).name] = (
             train_X[i].detach().cpu().numpy(), -1)
+        if sim_val > best_sim_val:
+            best_sim_val = sim_val
+            best_x = train_X[i].detach().cpu().numpy()
 
-    return train_X.detach().cpu().numpy(), x_record
+    if return_best:
+        return train_X.detach().cpu().numpy(), x_record, best_x
+    else:
+        return train_X.detach().cpu().numpy(), x_record
 
 
 def sample_dirichlet_simplex(n_samples: int, d: int,
@@ -266,3 +275,4 @@ def prepare_init_obs_simplex(num_observations, num_dim, f,
     Y = torch.tensor(yy).double().reshape(-1, 1)
 
     return (train_X.detach().cpu().numpy(), Y.detach().cpu().numpy()), x_record
+

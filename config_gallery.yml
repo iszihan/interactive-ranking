@@ -6,14 +6,14 @@ gpu_ids: 0,1
 
 # How many observations to use for the initial phase
 # num_observations: 10
-num_observations: 5
-num_observations_per_step: 3
+num_observations: 3
+num_observations_per_step: 9
 
 # Hard upper bound you enforce later
 max_num_observations: 20
 
 # Optional: directory with any initial assets/records you want to load
-init_dir: "./init_candidates"
+init_dir: "./init_candidates_plane"
 
 # Global RNG seed used when step == 0
 seed: 1
@@ -39,9 +39,3 @@ alpha_config: '/scratch/ondemand29/chenxil/code/mood-board/search_benchmark/ld_e
 
 # Example image path
 example_path: '/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/'
-
-# Stage iterations
-# self.stage_iterations = config.get('stage_iterations', [5, 5])
-stage_iterations:
-  - 2
- 
