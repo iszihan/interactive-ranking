@@ -7,6 +7,7 @@ const referenceSection = document.getElementById("referenceSection");
 const referenceImg = document.getElementById("referenceImg");
 const previewSection = document.getElementById("previewSection");
 const previewImg = document.getElementById("previewImg");
+const previewBrick = document.querySelector(".preview-brick");
 const sliderPanel = document.getElementById("sliderPanel");
 const sliderList = document.getElementById("sliderList");
 const renderBtn = document.getElementById("renderBtn");
@@ -25,6 +26,9 @@ let sliderLabels = [];
 let sliderState = [];
 let sliderThumbnails = [];
 let historyEntries = [];
+const safetyIndex = new Map();
+let safetyRefreshPromise = null;
+let safetyRefreshQueued = false;
 
 const HISTORY_EPSILON = 1e-4;
 
@@ -109,6 +113,178 @@ function canonicalizeImage(src) {
   return src.split("?")[0];
 }
 
+function canonicalizeImageSrc(src) {
+  return canonicalizeImage(src);
+}
+
+function normalizeImageEntry(entry) {
+  if (!entry) {
+    return { url: null, canonical: null, isSafe: null };
+  }
+  if (typeof entry === "string") {
+    const canonical = canonicalizeImageSrc(entry);
+    return { url: entry, canonical, isSafe: null };
+  }
+  if (typeof entry === "object") {
+    const rawUrl = typeof entry.url === "string"
+      ? entry.url
+      : typeof entry.src === "string"
+        ? entry.src
+        : typeof entry.path === "string"
+          ? entry.path
+          : null;
+    const fallbackPath = typeof entry.basename === "string"
+      ? (entry.url && String(entry.url).startsWith("/outputs") ? `/outputs/${entry.basename}` : `/slots/${entry.basename}`)
+      : null;
+    const canonicalSource = rawUrl || fallbackPath;
+    const canonical = canonicalizeImageSrc(canonicalSource);
+    let isSafe;
+    if ("is_safe" in entry) {
+      if (entry.is_safe === null) {
+        isSafe = null;
+      } else if (typeof entry.is_safe === "boolean") {
+        isSafe = entry.is_safe;
+      }
+    }
+    if (isSafe === undefined && "isSafe" in entry) {
+      if (entry.isSafe === null) {
+        isSafe = null;
+      } else if (typeof entry.isSafe === "boolean") {
+        isSafe = entry.isSafe;
+      }
+    }
+    if (isSafe === undefined && "safe" in entry) {
+      if (entry.safe === null) {
+        isSafe = null;
+      } else if (typeof entry.safe === "boolean") {
+        isSafe = entry.safe;
+      }
+    }
+    if (isSafe === undefined && typeof entry.nsfw === "boolean") {
+      isSafe = !entry.nsfw;
+    }
+    if (isSafe === undefined) {
+      isSafe = null;
+    }
+    return {
+      url: rawUrl || canonical,
+      canonical,
+      isSafe,
+    };
+  }
+  return { url: null, canonical: null, isSafe: null };
+}
+
+function rememberImageSafety(canonical, isSafe) {
+  if (!canonical) return;
+  if (isSafe === null || isSafe === undefined) {
+    safetyIndex.delete(canonical);
+    return;
+  }
+  safetyIndex.set(canonical, Boolean(isSafe));
+}
+
+function markImageSafetyUnknown(canonical, brick) {
+  if (!canonical) return;
+  safetyIndex.delete(canonical);
+  if (brick) {
+    applySafetyOverlay(brick, null);
+  }
+}
+
+function applySafetyOverlay(brick, isSafe = true) {
+  if (!brick) return;
+  const overlay = brick.querySelector(".nsfw-overlay");
+  if (isSafe === true) {
+    brick.classList.remove("nsfw-flagged", "nsfw-pending");
+    if (overlay) overlay.remove();
+    return;
+  }
+  if (isSafe === false) {
+    brick.classList.remove("nsfw-pending");
+    brick.classList.add("nsfw-flagged");
+    if (!overlay) {
+      const mask = document.createElement("div");
+      mask.className = "nsfw-overlay";
+      mask.innerHTML = "<span>Blurred for Safety</span>";
+      brick.appendChild(mask);
+    }
+    return;
+  }
+  brick.classList.add("nsfw-pending");
+  brick.classList.remove("nsfw-flagged");
+  if (overlay) overlay.remove();
+}
+
+function syncSafetyOverlays() {
+  const previewCanonical = previewImg?.dataset?.src || null;
+  const previewDatasetSafe = previewImg?.dataset?.safe;
+  let previewState = null;
+  if (previewDatasetSafe === "true") previewState = true;
+  else if (previewDatasetSafe === "false") previewState = false;
+  if (previewCanonical && safetyIndex.has(previewCanonical)) {
+    previewState = safetyIndex.get(previewCanonical);
+  }
+  if (previewCanonical) {
+    applySafetyOverlay(previewBrick, previewState);
+  }
+  if (historyList) {
+    historyList.querySelectorAll(".history-thumb").forEach((thumb) => {
+      const img = thumb.querySelector("img");
+      const canonical = img?.dataset?.src || null;
+      const safeAttr = img?.dataset?.safe;
+
+      let state = null;
+      if (safeAttr === "true") state = true;
+      else if (safeAttr === "false") state = false;
+      if (canonical) {
+        const indexed = safetyIndex.has(canonical) ? safetyIndex.get(canonical) : null;
+        if (indexed !== null && indexed !== undefined) {
+          state = indexed;
+        }
+      }
+      applySafetyOverlay(thumb, state);
+    });
+  }
+}
+
+async function refreshSafetyFromServer() {
+  if (safetyRefreshPromise) {
+    safetyRefreshQueued = true;
+    return safetyRefreshPromise;
+  }
+
+  safetyRefreshPromise = (async () => {
+    try {
+      const resp = await fetch("/api/images");
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const entries = Array.isArray(data.images) ? data.images : [];
+      for (const entry of entries) {
+        const normalized = normalizeImageEntry(entry);
+        if (!normalized.canonical) continue;
+        rememberImageSafety(normalized.canonical, normalized.isSafe);
+      }
+      syncSafetyOverlays();
+    } catch (err) {
+      console.warn("Safety refresh failed", err);
+    }
+  })();
+
+  const currentPromise = safetyRefreshPromise;
+  try {
+    await currentPromise;
+  } finally {
+    safetyRefreshPromise = null;
+    if (safetyRefreshQueued) {
+      safetyRefreshQueued = false;
+      return refreshSafetyFromServer();
+    }
+  }
+
+  return currentPromise;
+}
+
 function formatHistoryTimestamp(ts) {
   if (!Number.isFinite(ts)) return undefined;
   try {
@@ -133,10 +309,16 @@ function buildHistoryEntry(raw) {
   const vector = raw.x.map((value) => Number(value));
   if (!vector.length || vector.some((v) => Number.isNaN(v))) return null;
   const timestamp = typeof raw.timestamp === "number" ? raw.timestamp : Date.now() / 1000;
+  const normalizedImage = normalizeImageEntry({
+    url: raw.image,
+    is_safe: raw.is_safe,
+    basename: raw.image ? raw.image.split("/").pop() : undefined,
+  });
   return {
     x: vector,
     similarity: typeof raw.similarity === "number" ? raw.similarity : undefined,
-    image: canonicalizeImage(raw.image),
+    image: normalizedImage.canonical,
+    isSafe: normalizedImage.isSafe,
     timestamp,
     label: formatHistoryTimestamp(timestamp),
   };
@@ -208,15 +390,29 @@ function updateReferenceImage(src) {
 
 function updatePreviewImage(src) {
   if (!previewSection || !previewImg) return;
-  if (!src) {
+  const normalized = normalizeImageEntry(src);
+  if (!normalized.canonical) {
     previewImg.removeAttribute("src");
     previewSection.classList.add("hidden");
     return;
   }
-  const canonical = src.split("?")[0];
+  const canonical = normalized.canonical;
   previewImg.dataset.src = canonical;
+  if (normalized.isSafe === null || normalized.isSafe === undefined) {
+    delete previewImg.dataset.safe;
+  } else {
+    previewImg.dataset.safe = String(normalized.isSafe);
+  }
   previewImg.src = `${canonical}?t=${Date.now()}`;
   previewSection.classList.remove("hidden");
+
+  if (normalized.isSafe === null || normalized.isSafe === undefined) {
+    markImageSafetyUnknown(canonical, previewBrick);
+  } else {
+    rememberImageSafety(canonical, normalized.isSafe);
+    applySafetyOverlay(previewBrick, normalized.isSafe);
+  }
+  syncSafetyOverlays();
 }
 
 function formatSliderValue(value) {
@@ -410,6 +606,7 @@ function renderHistory() {
   });
 
   historySection.classList.remove("hidden");
+  syncSafetyOverlays();
 }
 
 function addHistoryEntry(payload) {
@@ -450,6 +647,8 @@ async function startProcess() {
         updatePreviewImage(historyEntries[0].image || null);
       }
     }
+
+    refreshSafetyFromServer();
 
     if (controls) controls.classList.add("hidden");
     if (sliderPanel && sliderLabels.length) sliderPanel.classList.remove("hidden");
@@ -506,7 +705,22 @@ async function renderFromSliders(options = {}) {
       }
     }
 
-    updatePreviewImage(data.image || null);
+    const normalizedPreview = normalizeImageEntry({
+      url: data.image,
+      is_safe: data.is_safe,
+      basename: data.image ? data.image.split("/").pop() : undefined,
+    });
+    if (normalizedPreview.canonical) {
+      if (normalizedPreview.isSafe === null || normalizedPreview.isSafe === undefined) {
+        markImageSafetyUnknown(normalizedPreview.canonical, previewBrick);
+      } else {
+        rememberImageSafety(normalizedPreview.canonical, normalizedPreview.isSafe);
+      }
+    }
+    updatePreviewImage(normalizedPreview);
+    if (normalizedPreview.canonical) {
+      refreshSafetyFromServer();
+    }
     if (!isHistoryRender) {
       addHistoryEntry(data);
     }

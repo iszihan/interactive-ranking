@@ -357,6 +357,53 @@ body.no-scroll{
 }
 .loading-wrap{ display: grid; justify-items: center; row-gap: .5rem; text-align: center; }
 
+.brick.nsfw-flagged img{
+  filter: blur(2px) saturate(0.78);
+  transform: scale(1.015);
+  transition: filter 0.2s ease, transform 0.2s ease;
+}
+.brick.nsfw-pending img{
+  filter: blur(10px) saturate(0.78);
+  transform: scale(1.015);
+  transition: filter 0.2s ease, transform 0.2s ease;
+}
+
+.zoom-brick.nsfw-flagged img{
+  filter: blur(2px) saturate(0.78);
+  transform: scale(1.015);
+  transition: filter 0.2s ease, transform 0.2s ease;
+}
+.zoom-brick.nsfw-pending img{
+  filter: blur(10px) saturate(0.78);
+  transform: scale(1.015);
+  transition: filter 0.2s ease, transform 0.2s ease;
+}
+
+.nsfw-overlay{
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: rgba(8, 11, 27, 0.55);
+  backdrop-filter: blur(8px);
+  box-shadow: inset 0 0 32px rgba(0, 0, 0, 0.45);
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 0 14px;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.nsfw-overlay span{
+  line-height: 1.4;
+}
+
 .spinner{
   width: 22px; height: 22px;
   border: 3px solid #999; border-top-color: transparent;

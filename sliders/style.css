@@ -377,7 +377,9 @@ body.no-scroll{
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 10px 12px;
-  display: grid;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   gap: 4px;
   font-family: inherit;
   color: var(--text-primary);
@@ -395,6 +397,62 @@ body.no-scroll{
   color: var(--text-muted);
   font-size: 0.8rem;
   font-family: 'JetBrains Mono', 'Space Mono', monospace;
+}
+
+.history-thumb{
+  width: 60px;
+  height: 60px;
+  border-radius: 10px;
+  overflow: hidden;
+  position: relative;
+  background: #f2f4f9;
+  align-self: center;
+}
+
+.history-thumb img{
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.preview-brick.nsfw-flagged img,
+.history-thumb.nsfw-flagged img{
+  filter: blur(10px) saturate(0.78);
+  transform: scale(1.025);
+  transition: filter 0.2s ease, transform 0.2s ease;
+}
+.preview-brick.nsfw-pending img,
+.history-thumb.nsfw-pending img{
+  filter: blur(10px) saturate(0.78);
+  transform: scale(1.015);
+  transition: filter 0.2s ease, transform 0.2s ease;
+}
+
+.nsfw-overlay{
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: rgba(8, 11, 27, 0.55);
+  backdrop-filter: blur(8px);
+  box-shadow: inset 0 0 32px rgba(0, 0, 0, 0.45);
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 0 14px;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.nsfw-overlay span{
+  line-height: 1.4;
 }
 
 .description-button,
