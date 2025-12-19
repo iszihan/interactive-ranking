@@ -24,6 +24,7 @@ import pySequentialLineSearch
 
 from helper.infer import infer
 from engine import obj_sim, infer_image_img2img, prepare_init_obs
+from demographics import Demographics
 
 CONFIG_FILE = Path(__file__).parent.resolve() / "config.yml"
 
@@ -40,7 +41,12 @@ WORKING_DIR.mkdir(parents=True, exist_ok=True)
 DESCRIPTION_DIR = FRONTEND_DIR / "description"
 DESCRIPTION_DIR.mkdir(parents=True, exist_ok=True)
 
+DEMO_DIR = OUTPUT_DIR / "demographics"
+DEMO_DIR.mkdir(parents=True, exist_ok=True)
+
 app = FastAPI()
+DEMO_ENABLED: bool = False
+DEMO_PARTICIPANT_ID: str | None = None
 
 # helpers ------------------------------------------------------------
 
@@ -378,6 +384,31 @@ def start() -> JSONResponse:
     return JSONResponse({"status": "pending", "images": []}, status_code=202)
 
 
+@app.post("/api/demographics")
+def save_demographics(payload: Demographics) -> JSONResponse:
+    if not DEMO_ENABLED:
+        return JSONResponse({"ok": False, "error": "Demographics disabled"}, status_code=404)
+    record = payload.to_storage_dict()
+    if DEMO_PARTICIPANT_ID:
+        record["participant_id"] = DEMO_PARTICIPANT_ID
+    record["server"] = "ranking"
+    suffix = record.get("participant_id") or record.get("timestamp_ms")
+    out_path = DEMO_DIR / f"demo_{suffix}.json"
+    try:
+        out_path.write_text(json.dumps(record, indent=2))
+    except Exception as exc:  # pragma: no cover
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/demographics/config")
+def demographics_config() -> JSONResponse:
+    return JSONResponse({
+        "enabled": DEMO_ENABLED,
+        "participant_id": DEMO_PARTICIPANT_ID,
+    })
+
+
 class NextRequest(BaseModel):
     ranking: List[str]
     n: Optional[int] = None
@@ -446,4 +477,16 @@ async def events():
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Interactive ranking server")
+    parser.add_argument("--demographic", dest="demographic", type=str,
+                        help="Participant ID to enable demographic collection")
+    args = parser.parse_args()
+
+    if args.demographic:
+        DEMO_ENABLED = True
+        DEMO_PARTICIPANT_ID = args.demographic
+        print(f"[cli] Demographic collection enabled for participant: {DEMO_PARTICIPANT_ID}")
+
     uvicorn.run("server:app", host="127.0.0.1", port=8000, reload=True)
