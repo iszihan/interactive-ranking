@@ -1266,6 +1266,8 @@ if __name__ == "__main__":
                         help="Override path used when saving engine state")
     parser.add_argument("--demographic", dest="demographic", type=str,
                         help="Participant ID to enable demographic collection")
+    parser.add_argument("--port", dest="port", type=int, default=8000,
+                        help="Port to bind the server (default: 8000)")
     args = parser.parse_args()
 
     if args.state_path:
@@ -1288,4 +1290,4 @@ if __name__ == "__main__":
         print(f"[cli] Demographic collection enabled for participant: {DEMO_PARTICIPANT_ID}")
 
     _register_shutdown_handlers()
-    uvicorn.run("server_gallery:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("server_gallery:app", host="127.0.0.1", port=args.port, reload=False)

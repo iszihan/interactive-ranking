@@ -44,4 +44,3 @@ example_path: '/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/'
 # self.stage_iterations = config.get('stage_iterations', [5, 5])
 stage_iterations:
   - 2
- 

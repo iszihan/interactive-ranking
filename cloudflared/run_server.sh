@@ -1,0 +1,1 @@
+python ./server_gallery.py --port 8000 >server.log 2>&1 & until curl -fsS http://127.0.0.1:8000/ >/dev/null; do sleep 0.5; done; ./cloudflared/cloudflared tunnel --url http://127.0.0.1:8000

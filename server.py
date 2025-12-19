@@ -482,6 +482,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Interactive ranking server")
     parser.add_argument("--demographic", dest="demographic", type=str,
                         help="Participant ID to enable demographic collection")
+    parser.add_argument("--port", dest="port", type=int, default=8000,
+                        help="Port to bind the server (default: 8000)")
     args = parser.parse_args()
 
     if args.demographic:
@@ -489,4 +491,4 @@ if __name__ == "__main__":
         DEMO_PARTICIPANT_ID = args.demographic
         print(f"[cli] Demographic collection enabled for participant: {DEMO_PARTICIPANT_ID}")
 
-    uvicorn.run("server:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("server:app", host="127.0.0.1", port=args.port, reload=False)

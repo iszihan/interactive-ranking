@@ -27,4 +27,11 @@ def generate():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="127.0.0.1", port=8000, reload=True)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Minimum demo server")
+    parser.add_argument("--port", dest="port", type=int, default=8000,
+                        help="Port to bind the server (default: 8000)")
+    args = parser.parse_args()
+
+    uvicorn.run("server:app", host="127.0.0.1", port=args.port, reload=True)
