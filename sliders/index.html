@@ -59,6 +59,90 @@
     </div>
   </div>
 
+  <div id="demoOverlay" class="description-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="demoTitle">
+    <div class="description-content demo-content">
+      <div class="description-header">
+        <h2 id="demoTitle">Demographic information collection</h2>
+        <button id="demoClose" class="description-close" type="button">Close</button>
+      </div>
+      <form id="demoForm" class="demo-form">
+        <div class="form-section">
+          <div class="form-label">What is your age group?</div>
+          <div class="option-list">
+            <label><input type="radio" name="age_group" value="18-24"> 18-24</label>
+            <label><input type="radio" name="age_group" value="25-34"> 25-34</label>
+            <label><input type="radio" name="age_group" value="35-44"> 35-44</label>
+            <label><input type="radio" name="age_group" value="45-54"> 45-54</label>
+            <label><input type="radio" name="age_group" value="55-64"> 55-64</label>
+            <label><input type="radio" name="age_group" value="65+"> 65 or older</label>
+            <label><input type="radio" name="age_group" value="Prefer not to say"> Prefer not to say</label>
+          </div>
+        </div>
+
+        <div class="form-section">
+          <div class="form-label">What is your gender identity?</div>
+          <div class="option-list">
+            <label><input type="radio" name="gender_identity" value="Woman"> Woman</label>
+            <label><input type="radio" name="gender_identity" value="Man"> Man</label>
+            <label><input type="radio" name="gender_identity" value="Non-binary"> Non-binary</label>
+            <label class="option-with-input"><input type="radio" name="gender_identity" value="Self-describe"> Prefer to self-describe: <input type="text" id="genderSelfDescribe" name="gender_self_describe" placeholder="Optional"></label>
+            <label><input type="radio" name="gender_identity" value="Prefer not to say"> Prefer not to say</label>
+          </div>
+        </div>
+
+        <div class="form-section">
+          <div class="form-label">How familiar are you with AI-based image generation tools?</div>
+          <div class="option-list">
+            <label><input type="radio" name="familiarity" value="Not at all familiar"> Not at all familiar</label>
+            <label><input type="radio" name="familiarity" value="Slightly familiar"> Slightly familiar</label>
+            <label><input type="radio" name="familiarity" value="Moderately familiar"> Moderately familiar</label>
+            <label><input type="radio" name="familiarity" value="Very familiar"> Very familiar</label>
+          </div>
+        </div>
+
+        <div class="form-section">
+          <div class="form-label">How often do you use AI-based image generation tools?</div>
+          <div class="option-list">
+            <label><input type="radio" name="usage_frequency" value="Never"> Never</label>
+            <label><input type="radio" name="usage_frequency" value="Less than once a month"> Less than once a month</label>
+            <label><input type="radio" name="usage_frequency" value="A few times a month"> A few times a month</label>
+            <label><input type="radio" name="usage_frequency" value="A few times a week"> A few times a week</label>
+            <label><input type="radio" name="usage_frequency" value="Daily or almost daily"> Daily or almost daily</label>
+          </div>
+        </div>
+
+        <div class="form-section">
+          <div class="form-label">Which of the following best describes your experience with these tools? (Select all that apply)</div>
+          <div class="option-list">
+            <label><input type="checkbox" name="experience_depth" value="Only tried a few times"> I have only tried them a few times</label>
+            <label><input type="checkbox" name="experience_depth" value="Personal or creative projects"> I use them for personal or creative projects</label>
+            <label><input type="checkbox" name="experience_depth" value="Professional or academic work"> I use them for professional or academic work</label>
+            <label><input type="checkbox" name="experience_depth" value="Fine-tuned or customized models"> I have fine-tuned or customized models</label>
+            <label><input type="checkbox" name="experience_depth" value="None of the above"> None of the above</label>
+          </div>
+        </div>
+
+        <div class="form-section">
+          <div class="form-label">Do you have prior experience in any of the following areas? (Select all that apply)</div>
+          <div class="option-list">
+            <label><input type="checkbox" name="domain_background" value="Visual arts or design"> Visual arts or design</label>
+            <label><input type="checkbox" name="domain_background" value="Computer science or engineering"> Computer science or engineering</label>
+            <label><input type="checkbox" name="domain_background" value="Machine learning or AI"> Machine learning or AI</label>
+            <label><input type="checkbox" name="domain_background" value="None of the above"> None of the above</label>
+          </div>
+        </div>
+
+        <div class="form-actions">
+          <div id="demoError" class="form-error hidden"></div>
+          <div class="form-actions-row">
+            <button type="submit" id="demoSubmit">Continue</button>
+          </div>
+          <div class="form-note">Responses are anonymous and used only to contextualize study results.</div>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <button id="descriptionToggle" class="description-button" type="button">Task Description</button>
    <button id="tutorialToggle" class="tutorial-button" type="button">Tutorial</button>
   <div id="descriptionOverlay" class="description-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="descriptionTitle">

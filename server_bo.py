@@ -39,6 +39,7 @@ from search_benchmark.comparison_solvers import fit_gpytorch_pair_model, pairwis
 from engine import (obj_sim, infer_image_img2img,
                     prepare_init_obs, prepare_init_obs_simplex, infer_image,
                     check_nsfw_images)
+from demographics import Demographics
 
 from botorch.acquisition import (
     qUpperConfidenceBound)
@@ -71,6 +72,9 @@ DESCRIPTION_DIR.mkdir(parents=True, exist_ok=True)
 TUTORIAL_DIR = FRONTEND_DIR / "tutorial"
 TUTORIAL_DIR.mkdir(parents=True, exist_ok=True)
 
+DEMO_DIR = OUTPUT_DIR / "demographics"
+DEMO_DIR.mkdir(parents=True, exist_ok=True)
+
 STATE_PATH_OVERRIDE: Path | None = None
 STATE_SAVE_PATH_OVERRIDE: Path | None = None
 
@@ -94,6 +98,17 @@ if _env_state_save_override:
             f"[env] Failed to apply ENGINE_STATE_SAVE_PATH_OVERRIDE: {exc}")
 
 app = FastAPI()
+DEMO_ENABLED: bool = False
+DEMO_PARTICIPANT_ID: str | None = None
+
+# Allow demographics to be set via environment (mirrors state-path handling)
+_env_demo_enabled = os.environ.get("DEMOGRAPHIC_ENABLED")
+_env_demo_participant = os.environ.get("DEMOGRAPHIC_PARTICIPANT_ID")
+if _env_demo_enabled:
+    DEMO_ENABLED = str(_env_demo_enabled).lower() in {"1", "true", "yes", "on"}
+if _env_demo_participant:
+    DEMO_PARTICIPANT_ID = _env_demo_participant
+    DEMO_ENABLED = True
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -161,6 +176,7 @@ class Engine:
                  save_state_path: Path | None = None) -> None:
         self.outputs_dir = outputs_dir
         print(f"Outputs dir: {self.outputs_dir}")
+        self.clear_outputs()
 
         self.config_path = Path(config_path).resolve()
         self.config_snapshot: dict | None = None
@@ -1415,6 +1431,31 @@ def images() -> JSONResponse:
     })
 
 
+@app.post("/api/demographics")
+def save_demographics(payload: Demographics) -> JSONResponse:
+    if not DEMO_ENABLED:
+        return JSONResponse({"ok": False, "error": "Demographics disabled"}, status_code=404)
+    record = payload.to_storage_dict()
+    if DEMO_PARTICIPANT_ID:
+        record["participant_id"] = DEMO_PARTICIPANT_ID
+    record["server"] = "bo"
+    suffix = record.get("participant_id") or record.get("timestamp_ms")
+    out_path = DEMO_DIR / f"demo_{suffix}.json"
+    try:
+        out_path.write_text(json.dumps(record, indent=2))
+    except Exception as exc:  # pragma: no cover
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/demographics/config")
+def demographics_config() -> JSONResponse:
+    return JSONResponse({
+        "enabled": DEMO_ENABLED,
+        "participant_id": DEMO_PARTICIPANT_ID,
+    })
+
+
 @app.post("/api/start")
 def start() -> JSONResponse:
     eng = _require_engine()
@@ -1616,6 +1657,8 @@ if __name__ == "__main__":
                         help="Override path used to load engine state")
     parser.add_argument("--save-state-path", dest="save_state_path", type=str,
                         help="Override path used when saving engine state")
+    parser.add_argument("--demographic", dest="demographic", type=str,
+                        help="Participant ID to enable demographic collection")
     args = parser.parse_args()
 
     if args.state_path:
@@ -1629,6 +1672,13 @@ if __name__ == "__main__":
             STATE_SAVE_PATH_OVERRIDE)
         print(
             f"[cli] Using engine save state path override: {STATE_SAVE_PATH_OVERRIDE}")
+
+    if args.demographic:
+        DEMO_ENABLED = True
+        DEMO_PARTICIPANT_ID = args.demographic
+        os.environ["DEMOGRAPHIC_ENABLED"] = "1"
+        os.environ["DEMOGRAPHIC_PARTICIPANT_ID"] = DEMO_PARTICIPANT_ID
+        print(f"[cli] Demographic collection enabled for participant: {DEMO_PARTICIPANT_ID}")
 
     _register_shutdown_handlers()
     # uvicorn.run("server_bo:app", host="127.0.0.1", port=8000, reload=True)

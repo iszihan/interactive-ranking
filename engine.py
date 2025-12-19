@@ -296,6 +296,7 @@ def prepare_init_obs_simplex(num_observations, num_dim, f,
 def check_nsfw_images(
     images: list[Image.Image]
 ) -> list[bool]:
+    # https://discuss.huggingface.co/t/sdxl-safety-checker/49633/3
     safety_checker_input = feature_extractor(
         images, return_tensors="pt").to(device)
     images_np = [np.array(img) for img in images]

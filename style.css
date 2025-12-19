@@ -309,8 +309,9 @@ body.no-scroll{
 
 /* ---------- ranking container (scrolling row) ---------- */
 #container{
-  display:flex;
-  flex-wrap: nowrap !important;   /* force one row */
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
   gap:12px; overflow-x:auto; padding:8px 12px; max-width:100%;
   align-items:flex-start;
   flex: 1 1 auto;
@@ -320,6 +321,11 @@ body.no-scroll{
 .brick{
   flex: 0 0 clamp(var(--tile-min), var(--tile-ideal), var(--tile-max));
   position: relative;
+    display: inline-flex;
+    align-items: flex-start;
+    gap: 8px;
+    font-size: 0.95rem;
+    color: #2c2f3a;
   aspect-ratio: 1 / 1;
   border-radius: 12px;
   background: #f6f7fb;
@@ -398,6 +404,98 @@ body.no-scroll{
   padding: 0 14px;
   pointer-events: none;
   z-index: 2;
+}
+
+/* ---------- demographics form ---------- */
+.demo-content{
+  max-width: 1080px;
+}
+
+.demo-form{
+  padding: 12px 24px 18px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.form-section{
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.form-label{
+  font-weight: 600;
+  color: #1f2335;
+  letter-spacing: 0.02em;
+}
+
+.option-list{
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.option-list label{
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 0.95rem;
+  color: #2c2f3a;
+}
+
+.option-with-input input[type="text"]{
+  flex: 1 1 auto;
+  min-width: 140px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid #d5d9e5;
+  font-size: 0.95rem;
+}
+
+.form-actions{
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.form-actions-row{
+  display: flex;
+  justify-content: flex-end;
+}
+
+#demoSubmit{
+  appearance: none;
+  border: 1px solid #3C6AD9;
+  background: #4F8EF7;
+  color: #fff;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 12px 22px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+
+#demoSubmit:hover{ background: #405ccb; border-color: #405ccb; }
+#demoSubmit:active{ transform: scale(0.98); }
+#demoSubmit:disabled{ background: #c6d2f3; border-color: #c6d2f3; cursor: not-allowed; }
+
+.form-error{
+  color: #b3261e;
+  background: #fdecea;
+  border: 1px solid #f5c2c0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 0.9rem;
+}
+
+.form-note{
+  font-size: 0.9rem;
+  color: #4a4e61;
 }
 
 .nsfw-overlay span{

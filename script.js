@@ -21,6 +21,11 @@ const descriptionClose = document.getElementById("descriptionClose");
 const tutorialToggle = document.getElementById("tutorialToggle");
 const tutorialOverlay = document.getElementById("tutorialOverlay");
 const tutorialClose = document.getElementById("tutorialClose");
+const demoOverlay = document.getElementById("demoOverlay");
+const demoClose = document.getElementById("demoClose");
+const demoForm = document.getElementById("demoForm");
+const demoError = document.getElementById("demoError");
+const demoSubmit = document.getElementById("demoSubmit");
 let currentIteration = null;
 
 const defaultStageState = {
@@ -34,6 +39,10 @@ const defaultStageState = {
 };
 let stageState = { ...defaultStageState };
 let isGenerationInFlight = false;
+let demographicsSubmitted = false;
+let demographicsEnabled = false;
+let demographicsParticipantId = null;
+let demographicsConfigLoaded = false;
 
 function setBodyScrollLock(locked) {
   document.body.classList.toggle("no-scroll", Boolean(locked));
@@ -48,7 +57,7 @@ function openDescriptionOverlay() {
 function closeDescriptionOverlay() {
   if (!descriptionOverlay) return;
   descriptionOverlay.classList.add("hidden");
-  if (!tutorialOverlay || tutorialOverlay.classList.contains("hidden")) {
+  if (( !tutorialOverlay || tutorialOverlay.classList.contains("hidden")) && (!demoOverlay || demoOverlay.classList.contains("hidden"))) {
     setBodyScrollLock(false);
   }
 }
@@ -62,7 +71,26 @@ function openTutorialOverlay() {
 function closeTutorialOverlay() {
   if (!tutorialOverlay) return;
   tutorialOverlay.classList.add("hidden");
-  if (!descriptionOverlay || descriptionOverlay.classList.contains("hidden")) {
+  if (( !descriptionOverlay || descriptionOverlay.classList.contains("hidden")) && (!demoOverlay || demoOverlay.classList.contains("hidden"))) {
+    setBodyScrollLock(false);
+  }
+}
+
+function openDemoOverlay() {
+  if (!demoOverlay) {
+    startProcess();
+    return;
+  }
+  demoOverlay.classList.remove("hidden");
+  setBodyScrollLock(true);
+}
+
+function closeDemoOverlay() {
+  if (!demoOverlay) return;
+  demoOverlay.classList.add("hidden");
+  const descHidden = !descriptionOverlay || descriptionOverlay.classList.contains("hidden");
+  const tutHidden = !tutorialOverlay || tutorialOverlay.classList.contains("hidden");
+  if (descHidden && tutHidden) {
     setBodyScrollLock(false);
   }
 }
@@ -93,6 +121,16 @@ if (tutorialOverlay) {
     }
   });
 }
+if (demoClose) {
+  demoClose.addEventListener("click", closeDemoOverlay);
+}
+if (demoOverlay) {
+  demoOverlay.addEventListener("click", (event) => {
+    if (event.target === demoOverlay) {
+      closeDemoOverlay();
+    }
+  });
+}
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   if (descriptionOverlay && !descriptionOverlay.classList.contains("hidden")) {
@@ -101,7 +139,27 @@ document.addEventListener("keydown", (event) => {
   if (tutorialOverlay && !tutorialOverlay.classList.contains("hidden")) {
     closeTutorialOverlay();
   }
+  if (demoOverlay && !demoOverlay.classList.contains("hidden")) {
+    closeDemoOverlay();
+  }
 });
+
+async function loadDemographicsConfig(force = false) {
+  if (demographicsConfigLoaded && !force) return { enabled: demographicsEnabled, participant_id: demographicsParticipantId };
+  try {
+    const resp = await fetch("/api/demographics/config");
+    if (!resp.ok) throw new Error("config fetch failed");
+    const data = await resp.json();
+    demographicsEnabled = Boolean(data.enabled);
+    demographicsParticipantId = data.participant_id || null;
+  } catch (err) {
+    demographicsEnabled = false;
+    demographicsParticipantId = null;
+  } finally {
+    demographicsConfigLoaded = true;
+  }
+  return { enabled: demographicsEnabled, participant_id: demographicsParticipantId };
+}
 
 function normalizeStagePayload(stage) {
   if (!stage || typeof stage !== "object") {
@@ -516,6 +574,81 @@ function setTilesPerRow(N) {
   document.documentElement.style.setProperty("--tile-ideal", `${basis}vw`);
 }
 
+// ---------- demographics gating ----------
+function getCheckedValue(name) {
+  if (!demoForm) return null;
+  const el = demoForm.querySelector(`input[name="${name}"]:checked`);
+  return el ? el.value : null;
+}
+
+function getCheckedValues(name) {
+  if (!demoForm) return [];
+  return Array.from(demoForm.querySelectorAll(`input[name="${name}"]:checked`)).map((el) => el.value);
+}
+
+function collectDemographicsPayload() {
+  if (!demoForm) return {};
+  const payload = {
+    age_group: getCheckedValue("age_group"),
+    gender_identity: getCheckedValue("gender_identity"),
+    gender_self_describe: demoForm.querySelector("#genderSelfDescribe")?.value || null,
+    familiarity: getCheckedValue("familiarity"),
+    usage_frequency: getCheckedValue("usage_frequency"),
+    experience_depth: getCheckedValues("experience_depth"),
+    domain_background: getCheckedValues("domain_background"),
+    participant_id: demographicsParticipantId,
+  };
+  return payload;
+}
+
+async function submitDemographics(event) {
+  if (event) event.preventDefault();
+  if (demographicsSubmitted || !demographicsEnabled) {
+    closeDemoOverlay();
+    startProcess();
+    return;
+  }
+  if (!demoForm) {
+    startProcess();
+    return;
+  }
+  if (demoError) demoError.classList.add("hidden");
+  try {
+    if (demoSubmit) demoSubmit.disabled = true;
+    const payload = collectDemographicsPayload();
+    const resp = await fetch("/api/demographics", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) throw new Error("Failed to save responses");
+    demographicsSubmitted = true;
+    closeDemoOverlay();
+    await startProcess();
+  } catch (err) {
+    if (demoError) {
+      demoError.textContent = err && err.message ? err.message : "Could not save responses. Please try again.";
+      demoError.classList.remove("hidden");
+    }
+  } finally {
+    if (demoSubmit) demoSubmit.disabled = false;
+  }
+}
+
+if (demoForm) {
+  demoForm.addEventListener("submit", submitDemographics);
+}
+
+async function handleStartClick(event) {
+  if (event) event.preventDefault();
+  await loadDemographicsConfig();
+  if (!demographicsEnabled || demographicsSubmitted || !demoForm) {
+    await startProcess();
+    return;
+  }
+  openDemoOverlay();
+}
+
 // ---------- start (initial images) ----------
 async function startProcess() {
   try {
@@ -548,7 +681,7 @@ async function startProcess() {
   }
 }
 
-if (startBtn) startBtn.addEventListener("click", startProcess);
+if (startBtn) startBtn.addEventListener("click", handleStartClick);
 
 // ---------- placeholders + per-slot reveal ----------
 function renderPlaceholders(n) {
