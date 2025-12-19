@@ -20,6 +20,22 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 sim_model, preprocess = None, None
 gt_img = None
 
+safety_check = True
+processor = None
+safety_checker = None
+feature_extractor = None
+if safety_check:
+    from transformers import CLIPImageProcessor as AutoProcessor
+    from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker as SafetyChecker
+
+    processor = AutoProcessor.from_pretrained(
+        "CompVis/stable-diffusion-safety-checker")
+    feature_extractor = AutoProcessor.from_pretrained(
+        "openai/clip-vit-base-patch32"
+    )
+    safety_checker = SafetyChecker.from_pretrained(
+        "CompVis/stable-diffusion-safety-checker").to(device)
+
 
 def infer_image_img2img(component_weights,
                         prompt,
@@ -276,3 +292,23 @@ def prepare_init_obs_simplex(num_observations, num_dim, f,
 
     return (train_X.detach().cpu().numpy(), Y.detach().cpu().numpy()), x_record
 
+
+def check_nsfw_images(
+    images: list[Image.Image]
+) -> list[bool]:
+    safety_checker_input = feature_extractor(
+        images, return_tensors="pt").to(device)
+    images_np = [np.array(img) for img in images]
+
+    _, has_nsfw_concepts = safety_checker(
+        images=images_np,
+        clip_input=safety_checker_input.pixel_values.to(device),
+    )
+    # # Debug:
+    # has_nsfw_concepts[0] = True
+    # # Set all to True for testing
+    # has_nsfw_concepts = [True] * len(images)
+
+    print(f'[safety] NSFW concepts: {has_nsfw_concepts}')
+
+    return has_nsfw_concepts

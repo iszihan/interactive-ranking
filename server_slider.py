@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 from fastapi.responses import JSONResponse
 from pathlib import Path
 import shutil
-from typing import List, Optional
+from typing import List, Optional, Any, Dict
 import asyncio
 import json
 import time
@@ -26,9 +26,10 @@ from pydantic import BaseModel
 import numpy as np
 import uvicorn
 from diffusers.utils import load_image
+from PIL import Image
 
 from helper.infer import infer
-from engine import (obj_sim, infer_image_img2img, infer_image)
+from engine import (obj_sim, infer_image_img2img, infer_image, check_nsfw_images)
 
 from async_multi_gpu_pool import MultiGPUInferPool
 from serialize import save_slider_state, load_slider_state, apply_slider_engine_state
@@ -658,11 +659,27 @@ class Engine:
         if out_url is None and image_path:
             out_url = str(image_path)
 
+        is_safe: bool | None = None
+        if image_path:
+            try:
+                with Image.open(image_path) as img:
+                    result = check_nsfw_images([img.convert("RGB")])
+                    if result:
+                        is_safe = not bool(result[0])
+            except Exception as exc:
+                print(f"[safety] slider eval safety check failed: {exc}")
+        # default to False (blur) if checker failed to return
+        if is_safe is None:
+            is_safe = False
+            
+        print(f'is_safe: {is_safe}')
+
         payload = {
             "x": arr.tolist(),
             "image": out_url,
             "similarity": sim_scalar,
             "timestamp": time.time(),
+            "is_safe": is_safe,
         }
         if record_history:
             self._record_slider_history(payload)
@@ -818,20 +835,66 @@ async def api_recall_state(payload: dict | None = Body(default=None)) -> JSONRes
     }, status_code=status)
 
 
-def _list_image_urls() -> List[str]:
+def _list_image_urls() -> List[Dict[str, Any]]:
     exts = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
-    slots = [p for p in SLOTS_DIR.iterdir()
-             if p.suffix.lower() in exts and p.is_file()]
-    outputs = [p for p in OUTPUT_DIR.iterdir()
-               if p.suffix.lower() in exts and p.is_file()]
+    slots = [p for p in SLOTS_DIR.iterdir() if p.suffix.lower() in exts and p.is_file()]
+    outputs = [p for p in OUTPUT_DIR.iterdir() if p.suffix.lower() in exts and p.is_file()]
 
-    # When restoring state, slot images represent the active round; fall back to
-    # the historical outputs directory only if no slot images exist.
-    images = slots or outputs
-    images.sort()
+    # Include both current slots (active round) and historical outputs so the
+    # slider UI can resolve safety for latest renders and history entries.
+    images = sorted(set(slots + outputs))
+    if not images:
+        return []
 
-    base = "/slots" if images is slots else "/outputs"
-    return [f"{base}/{p.name}" for p in images]
+    def base_for(path: Path) -> str:
+        return "/slots" if path.parent == SLOTS_DIR else "/outputs"
+
+    safety_map: dict[Path, Optional[bool]] = {}
+    eval_paths: list[Path] = []
+    pil_batch: list[Image.Image] = []
+
+    for path in images:
+        try:
+            with Image.open(path) as img:
+                pil_batch.append(img.convert("RGB"))
+            eval_paths.append(path)
+        except Exception as exc:
+            print(f"[safety] Failed to load {path}: {exc}")
+            safety_map[path] = None
+
+    if pil_batch:
+        try:
+            nsfw_hits = check_nsfw_images(pil_batch)
+            # nsfw_hits = [False] * len(pil_batch)  # Placeholder: assume all safe
+            if len(nsfw_hits) != len(eval_paths):
+                print(f"[safety] Warning: expected {len(eval_paths)} safety results, got {len(nsfw_hits)}")
+            for idx, path in enumerate(eval_paths):
+                if idx < len(nsfw_hits):
+                    safety_map[path] = not bool(nsfw_hits[idx])
+                else:
+                    safety_map[path] = None
+        except Exception as exc:
+            print(f"[safety] NSFW check failed: {exc}")
+            for path in eval_paths:
+                safety_map[path] = True
+        finally:
+            for img in pil_batch:
+                try:
+                    img.close()
+                except Exception:
+                    pass
+
+    payloads: List[Dict[str, object]] = []
+
+    for path in images:
+        state = safety_map.get(path, True)
+        payloads.append({
+            "url": f"{base_for(path)}/{path.name}",
+            "is_safe": state,
+            "basename": path.name,
+        })
+
+    return payloads
 
 
 def _relative_output_url(path: str | Path | None) -> str | None:
@@ -929,7 +992,8 @@ def start() -> JSONResponse:
 
     if latest_image is None:
         images = _list_image_urls()
-        latest_image = images[-1] if images else None
+        if images:
+            latest_image = images[-1]
 
     iteration = eng.get_slider_iteration()
     return JSONResponse({

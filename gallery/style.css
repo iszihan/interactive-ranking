@@ -163,6 +163,37 @@ body.no-scroll{ overflow: hidden; }
   position: relative;
   overflow: hidden;
 }
+.zoom-brick.nsfw-flagged img{
+  filter: blur(18px) saturate(0.6);
+  transform: scale(1.05);
+}
+.zoom-brick.nsfw-pending img{
+  filter: blur(18px) saturate(0.7);
+  transform: scale(1.03);
+}
+
+.zoom-safety-overlay{
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: rgba(8, 11, 27, 0.6);
+  color: #fff;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 0 20px;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.zoom-safety-overlay.hidden{
+  display: none;
+}
 #rankSection{
   width: 100%;
   display: flex;
@@ -292,6 +323,41 @@ body.no-scroll{ overflow: hidden; }
   border-radius: inherit;        /* keep loader/image corners round */
 }
 .loading-wrap{ display: grid; justify-items: center; row-gap: .5rem; text-align: center; }
+
+.brick.nsfw-flagged img{
+  filter: blur(14px) saturate(0.7);
+  transform: scale(1.04);
+  transition: filter 0.2s ease, transform 0.2s ease;
+}
+.brick.nsfw-pending img{
+  filter: blur(14px) saturate(0.7);
+  transform: scale(1.02);
+  transition: filter 0.2s ease, transform 0.2s ease;
+}
+
+.nsfw-overlay{
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: rgba(8, 11, 27, 0.55);
+  backdrop-filter: blur(12px);
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 0 14px;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.nsfw-overlay span{
+  line-height: 1.4;
+}
 
 .spinner{
   width: 22px; height: 22px;

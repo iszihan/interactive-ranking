@@ -13,6 +13,8 @@ const referenceSection = document.getElementById("referenceSection");
 const referenceImg = document.getElementById("referenceImg");
 const zoomSection = document.getElementById("zoomSection");
 const zoomImg = document.getElementById("zoomImg");
+const zoomBrick = document.querySelector(".zoom-brick");
+const zoomSafetyOverlay = document.getElementById("zoomSafetyOverlay");
 const descriptionToggle = document.getElementById("descriptionToggle");
 const descriptionOverlay = document.getElementById("descriptionOverlay");
 const descriptionClose = document.getElementById("descriptionClose");
@@ -33,6 +35,10 @@ const defaultStageState = {
 let stageState = { ...defaultStageState };
 let isGenerationInFlight = false;
 let selectedBrick = null;
+const safetyIndex = new Map();
+let safetyRefreshPromise = null;
+let safetyRefreshQueued = false;
+const SLOTS_BASE = "/slots"; // make sure this matches server
 
 function setBodyScrollLock(locked) {
   document.body.classList.toggle("no-scroll", Boolean(locked));
@@ -164,7 +170,6 @@ if (referenceSection) referenceSection.classList.add("hidden");
 if (iterationIndicator) iterationIndicator.classList.add("hidden");
 
 // ---------- selection (no drag ranking) ----------
-const SLOTS_BASE = "/slots"; // make sure this matches server
 
 function setIterationDisplay(value, { commit = true } = {}) {
   if (!iterationIndicator) return;
@@ -196,6 +201,177 @@ function updateReferenceImage(src) {
   referenceSection.classList.remove("hidden");
 }
 
+function canonicalizeImageSrc(src) {
+  if (typeof src !== "string" || !src) return null;
+  return src.split("?")[0];
+}
+
+function normalizeImageEntry(entry) {
+  if (!entry) {
+    return { url: null, canonical: null, isSafe: true };
+  }
+  if (typeof entry === "string") {
+    const canonical = canonicalizeImageSrc(entry);
+    return { url: entry, canonical, isSafe: true };
+  }
+  if (typeof entry === "object") {
+    const rawUrl = typeof entry.url === "string"
+      ? entry.url
+      : typeof entry.src === "string"
+        ? entry.src
+        : typeof entry.path === "string"
+          ? entry.path
+          : null;
+    const fallbackPath = typeof entry.basename === "string" ? `${SLOTS_BASE}/${entry.basename}` : null;
+    const canonicalSource = rawUrl || fallbackPath;
+    const canonical = canonicalizeImageSrc(canonicalSource);
+    let isSafe;
+    if ("is_safe" in entry) {
+      if (entry.is_safe === null) {
+        isSafe = null;
+      } else if (typeof entry.is_safe === "boolean") {
+        isSafe = entry.is_safe;
+      }
+    }
+    if (isSafe === undefined && "isSafe" in entry) {
+      if (entry.isSafe === null) {
+        isSafe = null;
+      } else if (typeof entry.isSafe === "boolean") {
+        isSafe = entry.isSafe;
+      }
+    }
+    if (isSafe === undefined && "safe" in entry) {
+      if (entry.safe === null) {
+        isSafe = null;
+      } else if (typeof entry.safe === "boolean") {
+        isSafe = entry.safe;
+      }
+    }
+    if (isSafe === undefined && typeof entry.nsfw === "boolean") {
+      isSafe = !entry.nsfw;
+    }
+    if (isSafe === undefined) {
+      isSafe = true;
+    }
+    return {
+      url: rawUrl || canonical,
+      canonical,
+      isSafe,
+    };
+  }
+  return { url: null, canonical: null, isSafe: true };
+}
+
+function rememberImageSafety(canonical, isSafe) {
+  if (!canonical) return;
+  if (isSafe === null || isSafe === undefined) {
+    safetyIndex.delete(canonical);
+    return;
+  }
+  safetyIndex.set(canonical, Boolean(isSafe));
+}
+
+function markImageSafetyUnknown(canonical, brick) {
+  if (!canonical) return;
+  safetyIndex.delete(canonical);
+  if (brick) {
+    applySafetyOverlay(brick, null);
+  }
+  if (zoomImg && zoomImg.dataset?.src === canonical) {
+    updateZoomSafety(canonical);
+  }
+}
+
+function applySafetyOverlay(brick, isSafe = true) {
+  if (!brick) return;
+  const overlay = brick.querySelector(".nsfw-overlay");
+  if (isSafe === true) {
+    brick.classList.remove("nsfw-flagged", "nsfw-pending");
+    if (overlay) overlay.remove();
+    return;
+  } else if (isSafe === false) {
+    brick.classList.remove("nsfw-pending");
+    brick.classList.add("nsfw-flagged");
+    if (!overlay) {
+      const mask = document.createElement("div");
+      mask.className = "nsfw-overlay";
+      mask.innerHTML = "<span>Blurred for Safety</span>";
+      brick.appendChild(mask);
+    }
+    return;
+  }
+  brick.classList.add("nsfw-pending");
+  brick.classList.remove("nsfw-flagged");
+  if (overlay) overlay.remove();
+}
+
+function syncSafetyOverlays() {
+  if (!container) return;
+  container.querySelectorAll(".brick").forEach((brick) => {
+    const img = brick.querySelector("img");
+    if (!img) return;
+    const canonical = img.dataset?.src;
+    let state = true;
+    if (canonical) {
+      state = safetyIndex.has(canonical) ? safetyIndex.get(canonical) : null;
+    }
+    applySafetyOverlay(brick, state);
+  });
+
+  const zoomCanonical = zoomImg?.dataset?.src || null;
+  updateZoomSafety(zoomCanonical);
+}
+
+function updateZoomSafety(canonical) {
+  if (!zoomBrick) return;
+  let state = true;
+  if (canonical) {
+    state = safetyIndex.has(canonical) ? safetyIndex.get(canonical) : null;
+  }
+  zoomBrick.classList.toggle("nsfw-flagged", state === false);
+  zoomBrick.classList.toggle("nsfw-pending", state === null);
+  if (zoomSafetyOverlay) {
+    zoomSafetyOverlay.classList.toggle("hidden", state !== false);
+  }
+}
+
+async function refreshSafetyFromServer() {
+  if (safetyRefreshPromise) {
+    safetyRefreshQueued = true;
+    return safetyRefreshPromise;
+  }
+
+  safetyRefreshPromise = (async () => {
+    try {
+      const resp = await fetch("/api/images");
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const entries = Array.isArray(data.images) ? data.images : [];
+      for (const entry of entries) {
+        const normalized = normalizeImageEntry(entry);
+        if (!normalized.canonical) continue;
+        rememberImageSafety(normalized.canonical, normalized.isSafe);
+      }
+      syncSafetyOverlays();
+    } catch (err) {
+      console.warn("Safety refresh failed", err);
+    }
+  })();
+
+  const currentPromise = safetyRefreshPromise;
+  try {
+    await currentPromise;
+  } finally {
+    safetyRefreshPromise = null;
+    if (safetyRefreshQueued) {
+      safetyRefreshQueued = false;
+      return refreshSafetyFromServer();
+    }
+  }
+
+  return currentPromise;
+}
+
 function indexOfElement(el) { return [...container.children].indexOf(el); }
 function getClientX(e) { return e.touches ? e.touches[0].clientX : e.clientX; }
 
@@ -216,6 +392,7 @@ function clearZoomSelection() {
     zoomImg.removeAttribute("data-src");
   }
   if (zoomSection) zoomSection.classList.add("hidden");
+  updateZoomSafety(null);
   updateActionButtons();
 }
 
@@ -235,6 +412,7 @@ function showZoomForBrick(brick) {
   zoomImg.src = zoomSrc;
   zoomImg.dataset.src = canonical;
   zoomSection.classList.remove("hidden");
+  updateZoomSafety(canonical);
   updateActionButtons();
 }
 
@@ -298,6 +476,7 @@ function renderPlaceholders(n) {
     img.alt = "";
     img.dataset.basename = `slot-${i}.png`;
     img.dataset.src = `${SLOTS_BASE}/slot-${i}.png`;
+    safetyIndex.delete(img.dataset.src);
     brick.appendChild(img);
 
     const overlay = document.createElement("div");
@@ -319,12 +498,16 @@ function renderImageList(images) {
   container.style.gap = "16px";
   container.style.overflow = "visible";
 
-  for (const src of list) {
+  let rendered = 0;
+  for (const entry of list) {
+    const normalized = normalizeImageEntry(entry);
+    const canonical = normalized?.canonical || canonicalizeImageSrc(normalized?.url);
+    if (!canonical) continue;
+
     const div = document.createElement("div");
     div.className = "brick";
     const img = document.createElement("img");
 
-    const canonical = src.split("?")[0];
     img.src = `${canonical}?v=${Date.now()}`;
     img.alt = "";
     img.style.maxWidth = "100%";
@@ -332,15 +515,19 @@ function renderImageList(images) {
     img.dataset.basename = canonical.split("/").pop();
     img.dataset.src = canonical;
 
+    rememberImageSafety(canonical, normalized.isSafe);
+    applySafetyOverlay(div, normalized.isSafe);
+
     div.appendChild(img);
     container.appendChild(div);
+    rendered += 1;
   }
 
   if (rankSection) rankSection.classList.remove("hidden");
   if (nextWrap) nextWrap.classList.remove("hidden");
 
-  setTilesPerRow(list.length || 6);
-  return list.length;
+  setTilesPerRow(rendered || 6);
+  return rendered;
 }
 
 async function setSlotImage(slot, round) {
@@ -352,10 +539,18 @@ async function setSlotImage(slot, round) {
   const canonical = `${SLOTS_BASE}/slot-${slot}.png`;
   img.dataset.basename = `slot-${slot}.png`;
   img.dataset.src = canonical;
+  markImageSafetyUnknown(canonical, brick);
   img.src = `${canonical}?v=${round}&t=${Date.now()}`;
 
   if (img.decode) { try { await img.decode(); } catch { } }
   overlay.style.display = "none";
+
+  let safetyState = true;
+  if (canonical) {
+    safetyState = safetyIndex.has(canonical) ? safetyIndex.get(canonical) : null;
+  }
+  applySafetyOverlay(brick, safetyState);
+  refreshSafetyFromServer();
 
   if (selectedBrick === brick) {
     showZoomForBrick(brick);
@@ -422,6 +617,8 @@ es.addEventListener("done", (ev) => {
   } else {
     updateActionButtons();
   }
+
+  refreshSafetyFromServer();
 });
 
 es.onerror = () => {
@@ -438,6 +635,7 @@ es.addEventListener("stage", (ev) => {
     }
     if (payload && Array.isArray(payload.images) && payload.images.length) {
       renderImageList(payload.images);
+      refreshSafetyFromServer();
     }
   } catch (err) {
     console.error("stage event parse failed", err);
@@ -454,6 +652,7 @@ async function refreshStageStatus() {
     }
     if (data && Array.isArray(data.images) && data.images.length) {
       renderImageList(data.images);
+      refreshSafetyFromServer();
     }
   } catch (err) {
     console.warn("stage status refresh failed", err);

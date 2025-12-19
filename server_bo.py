@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 from fastapi.responses import JSONResponse
 from pathlib import Path
 import shutil
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import asyncio
 import json
 import time
@@ -37,7 +37,8 @@ from helper.build_clusters import build_cluster_hierarchy, find_images_for_folde
 from search_benchmark.multi_solvers import break_clusters_even
 from search_benchmark.comparison_solvers import fit_gpytorch_pair_model, pairwise_to_single_task, generate_comparisons, generate_comparisons_index
 from engine import (obj_sim, infer_image_img2img,
-                    prepare_init_obs, prepare_init_obs_simplex, infer_image)
+                    prepare_init_obs, prepare_init_obs_simplex, infer_image,
+                    check_nsfw_images)
 
 from botorch.acquisition import (
     qUpperConfidenceBound)
@@ -1342,7 +1343,7 @@ async def api_recall_state(payload: dict | None = Body(default=None)) -> JSONRes
     }, status_code=status)
 
 
-def _list_image_urls() -> List[str]:
+def _list_image_urls() -> List[Dict[str, Any]]:
     exts = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
     slots = [p for p in SLOTS_DIR.iterdir()
              if p.suffix.lower() in exts and p.is_file()]
@@ -1355,7 +1356,53 @@ def _list_image_urls() -> List[str]:
     images.sort()
 
     base = "/slots" if images is slots else "/outputs"
-    return [f"{base}/{p.name}" for p in images]
+    if not images:
+        return []
+
+    safety_map: dict[Path, Optional[bool]] = {}
+    eval_paths: list[Path] = []
+    pil_batch: list[Image.Image] = []
+
+    for path in images:
+        try:
+            with Image.open(path) as img:
+                pil_batch.append(img.convert("RGB"))
+            eval_paths.append(path)
+        except Exception as exc:
+            print(f"[safety] Failed to load {path}: {exc}")
+            safety_map[path] = None
+
+    if pil_batch:
+        try:
+            nsfw_hits = check_nsfw_images(pil_batch)
+            if len(nsfw_hits) != len(eval_paths):
+                print(f"[safety] Warning: expected {len(eval_paths)} safety results, got {len(nsfw_hits)}")
+            for idx, path in enumerate(eval_paths):
+                if idx < len(nsfw_hits):
+                    safety_map[path] = not bool(nsfw_hits[idx])
+                else:
+                    safety_map[path] = None
+        except Exception as exc:
+            print(f"[safety] NSFW check failed: {exc}")
+            for path in eval_paths:
+                safety_map[path] = True
+        finally:
+            for img in pil_batch:
+                try:
+                    img.close()
+                except Exception:
+                    pass
+
+    payloads: List[Dict[str, object]] = []
+    for path in images:
+        state = safety_map.get(path, True)
+        payloads.append({
+            "url": f"{base}/{path.name}",
+            "is_safe": state,
+            "basename": path.name,
+        })
+
+    return payloads
 
 
 @app.get("/api/images")
