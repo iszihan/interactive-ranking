@@ -37,10 +37,56 @@ import sys
 sys.path.append('/scratch/ondemand29/chenxil/code/mood-board')
 
 
+def _bootstrap_config_override(argv: list[str] | None = None) -> None:
+    if argv is None:
+        argv = sys.argv[1:]
+    try:
+        idx = argv.index("--config")
+        if idx + 1 < len(argv):
+            os.environ.setdefault("CONFIG_PATH_OVERRIDE", argv[idx + 1])
+    except ValueError:
+        return
+
+
+_bootstrap_config_override()
+
 CONFIG_FILE = Path(__file__).parent.resolve() / "config_gallery.yml"
+_env_config_override = os.environ.get("CONFIG_PATH_OVERRIDE")
+if _env_config_override:
+    try:
+        CONFIG_FILE = Path(_env_config_override).expanduser().resolve()
+        print(f"[env] Using config override: {CONFIG_FILE}")
+    except Exception as exc:
+        print(f"[env] Failed to apply CONFIG_PATH_OVERRIDE: {exc}")
+
+
+def _resolve_output_dir(config_path: Path, default_dir: Path) -> Path:
+    try:
+        with open(config_path, "r") as f_cfg:
+            cfg = yaml.safe_load(f_cfg) or {}
+    except Exception as exc:
+        print(f"[config] Failed reading {config_path}: {exc}")
+        return default_dir
+    if not isinstance(cfg, dict):
+        return default_dir
+    override = cfg.get("output_dir")
+    if not override:
+        return default_dir
+    try:
+        candidate = Path(str(override)).expanduser()
+        if not candidate.is_absolute():
+            candidate = (config_path.parent / candidate).resolve()
+        else:
+            candidate = candidate.resolve()
+        return candidate
+    except Exception as exc:
+        print(f"[config] Failed to resolve output_dir {override}: {exc}")
+        return default_dir
+
 
 FRONTEND_DIR = Path(__file__).parent.resolve()
-OUTPUT_DIR = FRONTEND_DIR / "outputs"
+DEFAULT_OUTPUT_DIR = FRONTEND_DIR / "outputs"
+OUTPUT_DIR = _resolve_output_dir(CONFIG_FILE, DEFAULT_OUTPUT_DIR)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 PREINIT_DIR = OUTPUT_DIR / "preinit"
@@ -299,11 +345,13 @@ class Engine:
         control_img_path = WORKING_DIR / 'control.png'
         if not control_img_path.exists():
             # infer an image with baseline model as control
-            print(f'control image inference, {self.prompt}')
+            prompt = self.prompt
+            control_prompt = prompt.replace('drawing', 'photo')
+            print(f'control image inference, {control_prompt}')
             random_seed = 194850943985
             images = infer(
                 None,  # no lora
-                self.prompt,
+                control_prompt,
                 ' ',
                 random_seed,
                 30,
@@ -1266,6 +1314,8 @@ if __name__ == "__main__":
                         help="Override path used when saving engine state")
     parser.add_argument("--demographic", dest="demographic", type=str,
                         help="Participant ID to enable demographic collection")
+    parser.add_argument("--config", dest="config_path", type=str,
+                        help="Path to config file override")
     parser.add_argument("--port", dest="port", type=int, default=8000,
                         help="Port to bind the server (default: 8000)")
     args = parser.parse_args()
@@ -1288,6 +1338,12 @@ if __name__ == "__main__":
         os.environ["DEMOGRAPHIC_ENABLED"] = "1"
         os.environ["DEMOGRAPHIC_PARTICIPANT_ID"] = DEMO_PARTICIPANT_ID
         print(f"[cli] Demographic collection enabled for participant: {DEMO_PARTICIPANT_ID}")
+
+    if args.config_path:
+        config_override = Path(args.config_path).expanduser()
+        os.environ["CONFIG_PATH_OVERRIDE"] = str(config_override)
+        CONFIG_FILE = config_override.resolve()
+        print(f"[cli] Using config override: {CONFIG_FILE}")
 
     _register_shutdown_handlers()
     uvicorn.run("server_gallery:app", host="127.0.0.1", port=args.port, reload=False)
