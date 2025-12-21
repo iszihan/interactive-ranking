@@ -310,6 +310,6 @@ def check_nsfw_images(
     # # Set all to True for testing
     # has_nsfw_concepts = [True] * len(images)
 
-    print(f'[safety] NSFW concepts: {has_nsfw_concepts}')
+    # print(f'[safety] NSFW concepts: {has_nsfw_concepts}')
 
     return has_nsfw_concepts

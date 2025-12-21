@@ -904,7 +904,6 @@ class Engine:
         return dim2loras
 
     def construct_init_samples(self, *, capture_context: bool = False, context_iteration: int | None = None):
-        
         inf_f = self.f_init if self.train_X is None else self.f
         self.x_observations, x_record = prepare_init_obs_simplex(self.num_observations, len(
             self.dim2loras), inf_f, seed=self.seed, sparse_threshold=0.1, sampler=sample_dirichlet_simplex)

@@ -198,18 +198,15 @@ function updateActionButtons() {
   const stageReady = stageState.hasStages && stageState.nextStageReady;
   if (nextBtn) {
     nextBtn.disabled = Boolean(isGenerationInFlight || stageReady);
+    nextBtn.classList.toggle("hidden", stageReady);
   }
   if (stageBtn) {
     const shouldShow = stageReady;
     stageBtn.classList.toggle("hidden", !shouldShow);
     stageBtn.disabled = Boolean(isGenerationInFlight);
     if (shouldShow) {
-      const labelNumber = Number.isFinite(stageState.nextStageNumber)
-        ? stageState.nextStageNumber
-        : stageState.currentStage + 1;
-      stageBtn.textContent = Number.isFinite(labelNumber)
-        ? `Start Stage ${labelNumber}`
-        : "Start Next Stage";
+      // Keep the label user-facing as "Next" so stage transitions feel seamless.
+      stageBtn.textContent = "Next";
     }
   }
 }
@@ -943,7 +940,7 @@ if (stageBtn) {
   stageBtn.addEventListener("click", async () => {
     if (isGenerationInFlight) return;
     stageBtn.disabled = true;
-    if (statusEl) statusEl.textContent = "Advancing to next stage…";
+    if (statusEl) statusEl.textContent = "Loading next images…";
     try {
       const resp = await fetch("/api/stage/next", {
         method: "POST",
@@ -963,22 +960,22 @@ if (stageBtn) {
       }
       if (!resp.ok) {
         const reasonCode = data && data.reason ? String(data.reason) : null;
-        let friendly = "Next stage unavailable.";
-        if (reasonCode === "not-ready") friendly = "Finish the current stage before advancing.";
-        else if (reasonCode === "no-stages") friendly = "No additional stages are configured.";
-        else if (reasonCode === "completed") friendly = "All configured stages are complete.";
+        let friendly = "Unable to continue right now.";
+        if (reasonCode === "not-ready") friendly = "Finish the current set before continuing.";
+        else if (reasonCode === "no-stages") friendly = "No additional images are available.";
+        else if (reasonCode === "completed") friendly = "All image sets are complete.";
         throw new Error(friendly);
       }
 
       const rendered = renderImageList(data && Array.isArray(data.images) ? data.images : []);
       if (statusEl) {
         statusEl.textContent = rendered
-          ? `Next stage initialized with ${rendered} candidates.`
-          : "Next stage initialized. Waiting for new images…";
+          ? `Loaded ${rendered} new candidates.`
+          : "Loading next set…";
       }
     } catch (err) {
       if (statusEl) {
-        statusEl.textContent = `Next stage unavailable: ${err && err.message ? err.message : "unknown error"}`;
+        statusEl.textContent = `Unable to continue: ${err && err.message ? err.message : "unknown error"}`;
       }
     } finally {
       updateActionButtons();
