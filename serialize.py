@@ -109,6 +109,7 @@ def export_engine_state(engine: "Engine") -> Dict[str, Any]:
             "lora_merge_indices": list(getattr(engine, "lora_merge_indices", [])),
             "lora_merge_weights": list(getattr(engine, "lora_merge_weights", [])),
             "dim_index_per_lora": list(getattr(engine, "dim_index_per_lora", [])),
+            "comp_pairs": _tensor_to_list(getattr(engine, "comp_pairs", None)),
             "x_record": _dict_to_serializable(getattr(engine, "x_record", {})),
             "x_observations": {
                 "train_X": obs_train,
@@ -184,6 +185,12 @@ def apply_engine_state(engine: "Engine", payload: Dict[str, Any], device: torch.
 
     engine.train_X = _to_tensor(engine_payload.get("train_X"), device)
     engine.Y = _to_tensor(engine_payload.get("Y"), device)
+
+    comp_pairs_payload = engine_payload.get("comp_pairs")
+    if comp_pairs_payload is not None:
+        engine.comp_pairs = _to_tensor(comp_pairs_payload, device)
+    else:
+        engine.comp_pairs = torch.empty((0, 2), dtype=torch.long, device=device)
 
     engine.train_dataset_version = int(
         engine_payload.get("train_dataset_version", getattr(engine, "train_dataset_version", 0)))

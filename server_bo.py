@@ -17,6 +17,7 @@ from engine import (obj_sim, infer_image_img2img,
                     check_nsfw_images)
 from search_benchmark.comparison_solvers import fit_gpytorch_pair_model, pairwise_to_single_task, generate_comparisons, generate_comparisons_index
 from search_benchmark.multi_solvers import break_clusters_even
+from search_benchmark.util import sample_shuffled_unshuffled
 from helper.build_clusters import build_cluster_hierarchy, find_images_for_folders, build_tree
 from helper.sampler import sample_dirichlet_simplex
 from helper.infer import infer
@@ -273,6 +274,7 @@ class Engine:
         self.seed = config.get('seed', 0)
         self.gt_config = config.get('gt_config', '')
         self.max_num_observations = config.get('max_num_observations', 20)
+        self.sample_past_n = config.get('sample_past_n', 0)
 
         self.use_sdxl = True
         self.negative_prompt = config.get('negative_prompt', '')
@@ -301,7 +303,6 @@ class Engine:
         self.stage_index: int = 0
 
         self.target_dim = config.get('target_dim', 8)
-        self.sample_past = config.get('sample_past', 2)
         self.beta = config.get('beta', 9)
 
         alpha_config = config.get('alpha_config', None)
@@ -440,6 +441,9 @@ class Engine:
         self.Y = None
 
         self.path = []
+
+        # Pairwise comparisons accumulated across rounds
+        self.comp_pairs = torch.empty((0, 2), dtype=torch.long, device=device)
 
         self.train_dataset_history: list[dict] = []
         self.train_dataset_version: int = 0
@@ -820,7 +824,8 @@ class Engine:
 
         pl.seed_everything(self.seed)
 
-    def next_stage_start(self, *, force: bool = False) -> bool:
+    def next_stage_start(self, *, force: bool = False,
+                         ranking_basenames: list[str] | None = None) -> bool:
         if not self.stage_boundaries:
             print('No stage iterations configured; skipping next stage request.')
             return False
@@ -835,6 +840,19 @@ class Engine:
 
         self._archive_current_train_dataset(
             reason=f"stage-{self.stage_index}-complete")
+
+        if ranking_basenames:
+            self.ranking_history.append({
+                "event": "stage-advance",
+                "stage_index": int(self.stage_index),
+                "step": int(self.step),
+                "round": None,
+                "ranking": list(ranking_basenames),
+                "indices": [],
+                "selected": getattr(self, "last_selected_basename", None),
+                "saved_at": time.time(),
+                "train_version": int(self.train_dataset_version),
+            })
         self._begin_new_train_dataset_version()
 
         self.stage_index += 1
@@ -844,9 +862,19 @@ class Engine:
         self.clear_outputs()
 
         src_dir = WORKING_DIR
+        ranked_indices: list[int] = []
+        if ranking_basenames:
+            for img_name in ranking_basenames:
+                rec = self.x_record.get(Path(img_name).name)
+                if rec is None:
+                    continue
+                ranked_indices.append(int(rec[1]))
+
+        best_idx: int | None = ranked_indices[0] if ranked_indices else None
+        self.comp_pairs = torch.empty((0, 2), dtype=torch.long, device=device)
 
         self.dim2loras_before = copy.deepcopy(self.dim2loras)
-        self.dim2loras = self.construct_search_space()
+        self.dim2loras = self.construct_search_space(best_idx)
         self.update_search_space(src_dir)
         seed_context = self.construct_init_samples(
             capture_context=True,
@@ -861,7 +889,7 @@ class Engine:
 
         return True
 
-    def construct_search_space(self):
+    def construct_search_space(self, best_idx=None):
         # Look at the current train_X and Y to determine which LoRAs are active
         dim2loras = {
             i: ([Path(c[0]).stem], 0) for i, c in enumerate(self.component_weights)}
@@ -869,9 +897,13 @@ class Engine:
         if self.train_X is None:
             return dim2loras
 
-        # Pick the x with the largest y
-        y_array = self.Y.detach().cpu().numpy().reshape(-1)
-        best_idx = int(np.argmax(y_array))
+        # Pick the x with the largest y; fall back to best observed if not provided.
+        if best_idx is None:
+            if self.Y is None:
+                return dim2loras
+            y_array = self.Y.detach().cpu().numpy().reshape(-1)
+            best_idx = int(np.argmax(y_array))
+
         x_best = self.train_X[best_idx].reshape(-1)
 
         print(f"x_best: {x_best}")
@@ -946,7 +978,7 @@ class Engine:
             init_observations2 = torch.stack(init_observations2).double()
 
             if self.prev_pairwise_gp is not None:
-                init_observations2 = self.sort_x(
+                init_observations2, _ = self.sort_x(
                     self.prev_pairwise_gp, init_observations2, self.dim2loras_before, self.dim2loras)
 
             self.x_record = {}
@@ -1238,11 +1270,31 @@ class Engine:
             new_latent_Y = post.mean.squeeze(-1).unsqueeze(-1)  # shape (n,1)
         # Sort new_x based on estimated latent Y values (higher is better)
         # descending order
+        print(f'new_latent_Y: {new_latent_Y}')
         ranked_new_indices = torch.argsort(-new_latent_Y, dim=0)
         ranked_new_indices = ranked_new_indices.flatten()
         new_x = new_x[ranked_new_indices]
 
-        return new_x
+        return new_x, ranked_new_indices
+
+    def sample_past(self, latent_Y, comp_pairs, last_best, sample_past_n):
+        # Sample some past observations based on the utility values
+        past_indices = sample_shuffled_unshuffled(
+            latent_Y, comp_pairs, sample_past_n+1, device)
+
+        # Remove last_best if already present
+        past_indices = past_indices[past_indices != last_best]
+        past_indices = past_indices[:sample_past_n]
+
+        # Add the most current one
+        past_indices = torch.cat(
+            [past_indices, torch.tensor([last_best], device=device)])
+
+        # Uniqueify the past_indices
+        past_indices = torch.unique(past_indices)
+        print(f'past_indices: {past_indices}')
+
+        return past_indices
 
     async def next(
         self,
@@ -1267,44 +1319,64 @@ class Engine:
 
             self.last_past_indices = []
 
-        print(f'self.train_X: {self.train_X}')
-
         ranked_indices = [
             self.x_record[Path(img_name).name][1] for img_name in ranking_basenames]
-        comp_pairs = ranking2pairs(ranked_indices)
+        new_comp = ranking2pairs(ranked_indices)
+        new_comp = torch.tensor(new_comp, dtype=torch.long).to(device)
+        self.comp_pairs = torch.cat([self.comp_pairs, new_comp], dim=0).long()
         print(f'ranked_indices: {ranked_indices}')
 
-        comp_pairs = torch.tensor(comp_pairs, dtype=torch.long).to(device)
-        pairwise_gp = fit_gpytorch_pair_model(self.train_X, comp_pairs)
+        pairwise_gp = fit_gpytorch_pair_model(self.train_X, self.comp_pairs)
         gp, latent_Y = pairwise_to_single_task(
             self.train_X, self.Y, pairwise_gp)
 
-        print(f'ranked_indices: {ranked_indices}')
+        print(f'self.train_X: {self.train_X}')
+        print(f'self.comp_pairs: {self.comp_pairs}')
+        print(f'latent_Y: {latent_Y}')
 
         print('Acquiring GP...')
         new_x = self.acquire(gp)
+        new_batch_size = new_x.shape[0]
         print(f'Acquired new_x: {new_x}')
 
+        # Sample past
+        if self.sample_past_n >= 0:
+            last_past_indices = self.sample_past(
+                latent_Y, self.comp_pairs, last_best=ranked_indices[0], sample_past_n=self.sample_past_n)
+            last_past_indices = last_past_indices.tolist()
+        else:
+            last_past_indices = [ranked_indices[0]]
+        print(f'last_past_indices: {last_past_indices}')
+
         # Estimate the latent Y values for new_x
-        new_x = self.sort_x(pairwise_gp, new_x)
+        new_x, _ = self.sort_x(pairwise_gp, new_x)
         self.prev_pairwise_gp = pairwise_gp
 
         # Add new_x to train_X
-        new_I = [ranked_indices[0]] + \
+        new_I = last_past_indices + \
             [self.train_X.shape[0] + i for i in range(new_x.shape[0])]
         self.train_X = torch.cat([self.train_X, new_x], dim=0)
 
-        # Add the current best to the beginning of new_x
+        # Re-sort
+        print(f'self.train_X: {self.train_X}')
+        if self.sample_past_n >= 0:
+            new_x = self.train_X[new_I]
+            new_x, ranked_new_indices = self.sort_x(pairwise_gp, new_x)
+            new_I = [new_I[i] for i in ranked_new_indices]
+            print(f're-sorted new_x: {new_x}')
+            print(f're-sorted new_I: {new_I}')
+
+        # Add the current best to the path
         selected_x = self.x_record[img_name][0]
         if isinstance(selected_x, np.ndarray):
             selected_x = torch.from_numpy(selected_x).double().to(device)
-        new_x = torch.vstack([selected_x, new_x])
-
         self.path.append(selected_x)
 
         # --- slider setup ---
-        n = min(limit or self.num_observations_per_step + 1,
-                self.num_observations_per_step + 1)
+        # Recompute n after past sampling/re-sorting so frontend placeholder count
+        # matches the actual number of candidates being sent.
+        effective_total = new_x.shape[0]
+        n = effective_total
 
         # Do NOT clear outputs here; you overwrite slot files in place to avoid 404s
         # self.clear_outputs()  # <- leave out to keep placeholders visible
@@ -1354,9 +1426,11 @@ class Engine:
             self.last_round_context["new_y"] = [
                 float(val) for val in new_y_results]
 
-        feedback_values = new_y_results[1::]
-        self.Y = torch.cat([self.Y, torch.from_numpy(
-            np.array(feedback_values).reshape(-1, 1)).double().to(device)], dim=0)
+        self.Y = torch.cat([self.Y, torch.zeros(
+            (new_batch_size, 1), dtype=torch.double).to(device)], dim=0)  # for selected
+        self.Y[new_I] = torch.from_numpy(
+            np.array([float(v) for v in new_y]).reshape(-1, 1)).double().to(device)
+        print(f'Updated Y: {self.Y}')
 
         # Tell clients the round finished
         self.step += 1
@@ -1597,6 +1671,7 @@ class NextRequest(BaseModel):
 
 class StageAdvanceRequest(BaseModel):
     force: bool = False
+    ranking: List[str]
 
 
 # helper: get "foo.png" from any string, ignore blob:
@@ -1657,10 +1732,16 @@ async def api_stage_status() -> JSONResponse:
 
 
 @app.post("/api/stage/next")
-async def api_stage_next(req: StageAdvanceRequest | None = None) -> JSONResponse:
+async def api_stage_next(req: StageAdvanceRequest) -> JSONResponse:
     eng = _require_engine()
-    force_flag = bool(getattr(req, "force", False)) if req else False
-    advanced = await asyncio.to_thread(eng.next_stage_start, force=force_flag)
+    if not req or not req.ranking:
+        return JSONResponse({"error": "ranking required"}, status_code=400)
+
+    force_flag = bool(getattr(req, "force", False))
+    basenames = [b for b in (extract_basename(x) for x in req.ranking) if b]
+    advanced = await asyncio.to_thread(
+        eng.next_stage_start, force=force_flag,
+        ranking_basenames=basenames or None)
     if advanced:
         await eng.emit_stage_update()
 

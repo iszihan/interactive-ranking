@@ -941,11 +941,12 @@ if (stageBtn) {
     if (isGenerationInFlight) return;
     stageBtn.disabled = true;
     if (statusEl) statusEl.textContent = "Loading next images…";
+    const order = getRanking();
     try {
       const resp = await fetch("/api/stage/next", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ ranking: order }),
       });
       let data = {};
       try {
