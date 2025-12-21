@@ -503,12 +503,18 @@ def main(
                 raise ValueError("--par must be positive when provided.")
             participants_count = participants
 
-        if available < len(template_specs):
+        # Reserve the first study-sized block of inputs for the actual sessions
+        # so tutorial pulls from the remaining pool.
+        reserve_for_study = participants_count * SESSIONS_PER_PARTICIPANT * TASKS_PER_SESSION
+
+        if available < reserve_for_study + len(template_specs):
             raise ValueError(
-                f"Tutorial mode needs at least {len(template_specs)} prompt/weight pairs; only {available} available.")
+                f"Tutorial mode needs at least {reserve_for_study + len(template_specs)} prompt/weight pairs; only {available} available.")
 
         base_entries = list(zip(prompts, combos))
         rng.shuffle(base_entries)
+        base_entries = base_entries[reserve_for_study:]
+
         chosen = base_entries[: len(template_specs)]
         interface_gt = {name: pw for (name, _), pw in zip(template_specs, chosen)}
 

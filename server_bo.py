@@ -1,4 +1,25 @@
 # server_bo.py
+from serialize import export_engine_state, apply_engine_state, save_engine_state, load_engine_state
+from async_multi_gpu_pool import MultiGPUInferPool
+from helper.sampler import qmc_simplex_generator, get_mcmc_from_cache
+from search_benchmark.acq_prior import (
+    qSimplexUpperConfidenceBound,
+    stick_breaking_transform, inverse_stick_breaking_transform
+)
+from botorch.optim.optimize import gen_batch_initial_conditions
+from botorch.optim import optimize_acqf
+from botorch.sampling.normal import SobolQMCNormalSampler
+from botorch.acquisition import (
+    qUpperConfidenceBound)
+from demographics import Demographics
+from engine import (obj_sim, infer_image_img2img,
+                    prepare_init_obs, prepare_init_obs_simplex, infer_image,
+                    check_nsfw_images)
+from search_benchmark.comparison_solvers import fit_gpytorch_pair_model, pairwise_to_single_task, generate_comparisons, generate_comparisons_index
+from search_benchmark.multi_solvers import break_clusters_even
+from helper.build_clusters import build_cluster_hierarchy, find_images_for_folders, build_tree
+from helper.sampler import sample_dirichlet_simplex
+from helper.infer import infer
 import argparse
 import signal
 import atexit
@@ -31,28 +52,6 @@ import uvicorn
 from diffusers.utils import load_image
 import pySequentialLineSearch
 sys.path.append('/scratch/ondemand29/chenxil/code/mood-board')
-from helper.infer import infer
-from helper.sampler import sample_dirichlet_simplex
-from helper.build_clusters import build_cluster_hierarchy, find_images_for_folders, build_tree
-from search_benchmark.multi_solvers import break_clusters_even
-from search_benchmark.comparison_solvers import fit_gpytorch_pair_model, pairwise_to_single_task, generate_comparisons, generate_comparisons_index
-from engine import (obj_sim, infer_image_img2img,
-                    prepare_init_obs, prepare_init_obs_simplex, infer_image,
-                    check_nsfw_images)
-from demographics import Demographics
-
-from botorch.acquisition import (
-    qUpperConfidenceBound)
-from botorch.sampling.normal import SobolQMCNormalSampler
-from botorch.optim import optimize_acqf
-from botorch.optim.optimize import gen_batch_initial_conditions
-from search_benchmark.acq_prior import (
-    qSimplexUpperConfidenceBound,
-    stick_breaking_transform, inverse_stick_breaking_transform
-)
-from helper.sampler import qmc_simplex_generator, get_mcmc_from_cache
-from async_multi_gpu_pool import MultiGPUInferPool
-from serialize import export_engine_state, apply_engine_state, save_engine_state, load_engine_state
 
 
 def _bootstrap_config_override(argv: list[str] | None = None) -> None:
@@ -234,6 +233,7 @@ class Engine:
         self.autosave_enabled = True
         self.autoload_state = True
         self.state_loaded = False
+        self.prev_pairwise_gp = None
 
         self.step: int = 0
         self.cur_step: int = 0
@@ -438,7 +438,7 @@ class Engine:
         self.x_observations = None
         self.train_X = None
         self.Y = None
-        
+
         self.path = []
 
         self.train_dataset_history: list[dict] = []
@@ -845,6 +845,7 @@ class Engine:
 
         src_dir = WORKING_DIR
 
+        self.dim2loras_before = copy.deepcopy(self.dim2loras)
         self.dim2loras = self.construct_search_space()
         self.update_search_space(src_dir)
         seed_context = self.construct_init_samples(
@@ -857,7 +858,7 @@ class Engine:
 
         pl.seed_everything(self.seed)
         self.save_state(reason=f'stage-{self.stage_index}')
-        
+
         return True
 
     def construct_search_space(self):
@@ -903,12 +904,14 @@ class Engine:
 
         return dim2loras
 
-    def construct_init_samples(self, *, capture_context: bool = False, context_iteration: int | None = None):
+    def construct_init_samples(self, *, capture_context: bool = False,
+                               context_iteration: int | None = None):
         inf_f = self.f_init if self.train_X is None else self.f
         self.x_observations, x_record = prepare_init_obs_simplex(self.num_observations, len(
             self.dim2loras), inf_f, seed=self.seed, sparse_threshold=0.1, sampler=sample_dirichlet_simplex)
         seed_context: dict | None = None
-        context_iteration_value = context_iteration if context_iteration is not None else int(self.step)
+        context_iteration_value = context_iteration if context_iteration is not None else int(
+            self.step)
 
         # Reuse the existing train_X and Y if available
         if self.train_X is not None and self.Y is not None:
@@ -941,10 +944,10 @@ class Engine:
                         f"Skipping observation {sample} as it is too close to existing ones.")
 
             init_observations2 = torch.stack(init_observations2).double()
-            y_observations2 = torch.tensor(
-                init_y2).double().reshape(-1, 1).to(device)
-            self.x_observations = (init_observations2.detach().cpu(
-            ).numpy(), y_observations2.detach().cpu().numpy())
+
+            if self.prev_pairwise_gp is not None:
+                init_observations2 = self.sort_x(
+                    self.prev_pairwise_gp, init_observations2, self.dim2loras_before, self.dim2loras)
 
             self.x_record = {}
 
@@ -969,6 +972,8 @@ class Engine:
                 }
 
             seed_context = asyncio.run(_seed_initial_slots())
+            self.x_observations = (
+                np.array(seed_context["new_x"]), np.array(seed_context["new_y"]))
 
             print(f'In construct_init_samples: {self.x_record}')
         else:
@@ -980,11 +985,12 @@ class Engine:
             seed_context.setdefault("stage_seed", True)
         else:
             seed_context = None if not capture_context else seed_context
-            
+
         train_X, Y = self.x_observations
+        Y = Y.reshape(-1, 1)
         self.train_X = torch.from_numpy(train_X).double().to(device)
         self.Y = torch.from_numpy(Y).double().to(device)
-            
+
         return seed_context
 
     def update_search_space(self, init_src_dir):
@@ -1190,6 +1196,54 @@ class Engine:
 
         return new_x_ei
 
+    def sort_x(self, pairwise_gp, new_x, dim2loras_before=None, dim2loras_after=None):
+        new_x_orig = new_x.clone()
+        if dim2loras_before is not None and dim2loras_after is not None:
+            print(f'[sort_x] dim2loras_before: {dim2loras_before}')
+            print(f'[sort_x] dim2loras_after: {dim2loras_after}')
+            print(f'[sort_x] new_x: {new_x}')
+
+            # Initialize mapped tensor with same batch size as new_x but old dimension count.
+            new_x_orig = torch.zeros(
+                new_x.shape[0], len(dim2loras_before), dtype=new_x.dtype, device=new_x.device)
+
+            # Move the new_x after next start to the previous stage space
+            dim_sorted_before = sorted(dim2loras_before.keys())
+            lora_before2idx = {}
+            for idx in range(len(dim_sorted_before)):
+                dim = dim_sorted_before[idx]
+                loras = dim2loras_before[dim][0]
+                for lora in loras:
+                    lora_before2idx[lora] = idx
+
+            dim_sorted = sorted(dim2loras_after.keys())
+            for i in range(len(dim_sorted)):
+                dim = dim_sorted[i]
+                loras = dim2loras_after[dim][0]
+                for lora in loras:
+                    if lora not in lora_before2idx:
+                        raise ValueError(
+                            f'LoRA {lora} not found in previous stage mapping.')
+                    idx = lora_before2idx[lora]
+                    # Map the entire column for this dimension into the old space column.
+                    new_x_orig[:, idx] = new_x[:, i]
+
+            # Debug output
+            print(f'[sort_x] new_x mapped to original space: {new_x_orig}')
+
+        pairwise_gp.eval()
+        with torch.no_grad():
+            # a MultivariateNormal
+            post = pairwise_gp.posterior(new_x_orig)
+            new_latent_Y = post.mean.squeeze(-1).unsqueeze(-1)  # shape (n,1)
+        # Sort new_x based on estimated latent Y values (higher is better)
+        # descending order
+        ranked_new_indices = torch.argsort(-new_latent_Y, dim=0)
+        ranked_new_indices = ranked_new_indices.flatten()
+        new_x = new_x[ranked_new_indices]
+
+        return new_x
+
     async def next(
         self,
         ranking_basenames: list[str],
@@ -1232,16 +1286,8 @@ class Engine:
         print(f'Acquired new_x: {new_x}')
 
         # Estimate the latent Y values for new_x
-        pairwise_gp.eval()
-        with torch.no_grad():
-            # a MultivariateNormal
-            post = pairwise_gp.posterior(new_x)
-            new_latent_Y = post.mean.squeeze(-1).unsqueeze(-1)  # shape (n,1)
-        # Sort new_x based on estimated latent Y values (higher is better)
-        # descending order
-        ranked_new_indices = torch.argsort(-new_latent_Y, dim=0)
-        ranked_new_indices = ranked_new_indices.flatten()
-        new_x = new_x[ranked_new_indices]
+        new_x = self.sort_x(pairwise_gp, new_x)
+        self.prev_pairwise_gp = pairwise_gp
 
         # Add new_x to train_X
         new_I = [ranked_indices[0]] + \
@@ -1335,7 +1381,8 @@ def _require_engine() -> Engine:
 
 app.mount(
     "/static", StaticFiles(directory=str(FRONTEND_DIR / "bo")), name="static")
-app.mount("/description", StaticFiles(directory=str(DESCRIPTION_DIR)), name="description")
+app.mount("/description", StaticFiles(directory=str(DESCRIPTION_DIR)),
+          name="description")
 app.mount("/tutorial", StaticFiles(directory=str(TUTORIAL_DIR)), name="tutorial")
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 app.mount("/slots", StaticFiles(directory=str(SLOTS_DIR)), name="slots")
@@ -1348,6 +1395,7 @@ def serve_index():
     if not index_path.exists():
         raise RuntimeError(f"Frontend file missing: {index_path}")
     return FileResponse(str(index_path))
+
 
 @app.get("/api/health")
 def health() -> dict:
@@ -1445,7 +1493,8 @@ def _list_image_urls() -> List[Dict[str, Any]]:
         try:
             nsfw_hits = check_nsfw_images(pil_batch)
             if len(nsfw_hits) != len(eval_paths):
-                print(f"[safety] Warning: expected {len(eval_paths)} safety results, got {len(nsfw_hits)}")
+                print(
+                    f"[safety] Warning: expected {len(eval_paths)} safety results, got {len(nsfw_hits)}")
             for idx, path in enumerate(eval_paths):
                 if idx < len(nsfw_hits):
                     safety_map[path] = not bool(nsfw_hits[idx])
@@ -1735,7 +1784,8 @@ if __name__ == "__main__":
         DEMO_PARTICIPANT_ID = args.demographic
         os.environ["DEMOGRAPHIC_ENABLED"] = "1"
         os.environ["DEMOGRAPHIC_PARTICIPANT_ID"] = DEMO_PARTICIPANT_ID
-        print(f"[cli] Demographic collection enabled for participant: {DEMO_PARTICIPANT_ID}")
+        print(
+            f"[cli] Demographic collection enabled for participant: {DEMO_PARTICIPANT_ID}")
 
     if args.config_path:
         config_override = Path(args.config_path).expanduser()
@@ -1744,4 +1794,5 @@ if __name__ == "__main__":
         print(f"[cli] Using config override: {CONFIG_FILE}")
 
     _register_shutdown_handlers()
-    uvicorn.run("server_bo:app", host="127.0.0.1", port=args.port, reload=False)
+    uvicorn.run("server_bo:app", host="127.0.0.1",
+                port=args.port, reload=False)

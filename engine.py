@@ -288,7 +288,7 @@ def prepare_init_obs_simplex(num_observations, num_dim, f,
             train_X[i].detach().cpu().numpy(), i)
         yy.append(sim_val)
 
-    Y = torch.tensor(yy).double().reshape(-1, 1)
+    Y = torch.from_numpy(np.array(yy)).double().reshape(-1, 1)
 
     return (train_X.detach().cpu().numpy(), Y.detach().cpu().numpy()), x_record
 
