@@ -1,7 +1,6 @@
 pip install fastapi;
 pip install uvicorn;
 pip install -U "huggingface_hub>=0.24" "transformers>=4.44" hf_xet;
-conda install -c conda-forge cloudflared;
 
 # Installing collected packages: huggingface_hub, tokenizers, transformers
 #   Attempting uninstall: huggingface_hub
