@@ -512,6 +512,13 @@ def main(
                 f"Tutorial mode needs at least {reserve_for_study + len(template_specs)} prompt/weight pairs; only {available} available.")
 
         base_entries = list(zip(prompts, combos))
+        # filter_keywords = [" rose", " woman", " cat", " bottle"]
+        # base_entries = [
+        #     entry for entry in base_entries
+        #     if not any(kw in entry[0].lower() for kw in filter_keywords)
+        # ]
+        # print(base_entries)
+        # exit()
         rng.shuffle(base_entries)
         base_entries = base_entries[reserve_for_study:]
 
