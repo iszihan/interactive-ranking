@@ -16,6 +16,7 @@ const zoomSection = document.getElementById("zoomSection");
 const zoomImg = document.getElementById("zoomImg");
 const zoomBrick = document.querySelector(".zoom-brick");
 const zoomSafetyOverlay = document.getElementById("zoomSafetyOverlay");
+const gridLabel = document.getElementById("gridLabel");
 const gridSection = document.getElementById("gridSection");
 const gridContainer = document.getElementById("gridContainer");
 const descriptionToggle = document.getElementById("descriptionToggle");
@@ -468,6 +469,12 @@ function setTopKValue(value) {
   topK = Number.isFinite(numeric) && numeric > 0 ? Math.floor(numeric) : null;
   clampSelectionToLimit();
   updateRankMidLabel();
+  if (gridLabel) {
+    const label = topK && topK > 0
+      ? `All images (right-click to select the top ${topK})`
+      : "All images (right-click to select)";
+    gridLabel.textContent = label;
+  }
   updateActionButtons();
 }
 

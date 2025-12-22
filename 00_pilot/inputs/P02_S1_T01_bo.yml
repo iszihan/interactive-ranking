@@ -19,4 +19,4 @@ infer_steps: 30
 alpha_config: /scratch/ondemand29/chenxil/code/mood-board/search_benchmark/ld_experiments_1007/alpha_p1.yml
 example_path: /scratch/ondemand29/chenxil/data/civitai_sdxl_loras/
 stage_iterations:
-- 3
+- 10
