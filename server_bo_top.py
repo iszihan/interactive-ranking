@@ -275,6 +275,7 @@ class Engine:
         self.gt_config = config.get('gt_config', '')
         self.max_num_observations = config.get('max_num_observations', 20)
         self.sample_past_n = config.get('sample_past_n', 0)
+        self.top_k = config.get('top_k', 5)
 
         self.use_sdxl = True
         self.negative_prompt = config.get('negative_prompt', '')
@@ -1301,6 +1302,7 @@ class Engine:
         ranking_basenames: list[str],
         round_id: int | None = None,
         limit: int | None = None,
+        all_basenames: list[str] | None = None,
     ) -> None:
         # pick the user's top choice
         self.last_selected_basename = ranking_basenames[0]
@@ -1321,8 +1323,17 @@ class Engine:
 
         ranked_indices = [
             self.x_record[Path(img_name).name][1] for img_name in ranking_basenames]
+        additional_indices = [
+            self.x_record[Path(img_name).name][1] for img_name in all_basenames if img_name not in ranking_basenames]
         new_comp = ranking2pairs(ranked_indices)
+
+        # Add additional comparisons
+        for idx in ranked_indices:
+            for add_idx in additional_indices:
+                new_comp.append([idx, add_idx])
+
         new_comp = torch.tensor(new_comp, dtype=torch.long).to(device)
+        print(f'new_comp: {new_comp}')
         self.comp_pairs = torch.cat([self.comp_pairs, new_comp], dim=0).long()
         print(f'ranked_indices: {ranked_indices}')
 
@@ -1389,6 +1400,7 @@ class Engine:
             "step": int(self.step),
             "round": int(round_id),
             "ranking": list(ranking_basenames),
+            "all_basenames": list(all_basenames) if all_basenames else None,
             "indices": [int(x) for x in ranked_indices],
             "selected": self.last_selected_basename,
             "saved_at": time.time(),
@@ -1403,6 +1415,7 @@ class Engine:
             "new_x": ctx_new_x,
             "new_I": [int(i) for i in new_I],
             "ranking": list(ranking_basenames),
+            "all_basenames": list(all_basenames) if all_basenames else None,
             "timestamp": time.time(),
             "iteration": int(iteration),
         }
@@ -1454,7 +1467,7 @@ def _require_engine() -> Engine:
 
 
 app.mount(
-    "/static", StaticFiles(directory=str(FRONTEND_DIR / "bo")), name="static")
+    "/static", StaticFiles(directory=str(FRONTEND_DIR / "bo_top")), name="static")
 app.mount("/description", StaticFiles(directory=str(DESCRIPTION_DIR)),
           name="description")
 app.mount("/tutorial", StaticFiles(directory=str(TUTORIAL_DIR)), name="tutorial")
@@ -1465,7 +1478,7 @@ app.mount("/slots", StaticFiles(directory=str(SLOTS_DIR)), name="slots")
 @app.get("/")
 def serve_index():
     # Serve index.html from the same folder as this file
-    index_path = FRONTEND_DIR / "bo" / "index.html"
+    index_path = FRONTEND_DIR / "bo_top" / "index.html"
     if not index_path.exists():
         raise RuntimeError(f"Frontend file missing: {index_path}")
     return FileResponse(str(index_path))
@@ -1650,6 +1663,7 @@ def start() -> JSONResponse:
                 "images": images,
                 "gt_image": gt_url,
                 "iteration": iteration,
+                "top_k": getattr(eng, "top_k", None),
                 "stage": eng.stage_status(),
             }, headers={"Cache-Control": "no-store"})
         time.sleep(0.2)  # small sleep to avoid busy-wait
@@ -1660,12 +1674,14 @@ def start() -> JSONResponse:
         "images": [],
         "gt_image": gt_url,
         "iteration": iteration,
+        "top_k": getattr(eng, "top_k", None),
         "stage": eng.stage_status(),
     }, status_code=202)
 
 
 class NextRequest(BaseModel):
     ranking: List[str]
+    all_basenames: Optional[List[str]] = None
     n: Optional[int] = None
 
 
@@ -1699,25 +1715,35 @@ async def next_step(req: NextRequest) -> JSONResponse:
 
     # Normalize ranking -> basenames
     basenames = [b for b in (extract_basename(x) for x in req.ranking) if b]
+    top_k = getattr(eng, "top_k", None)
+    if top_k and top_k > 0:
+        basenames = basenames[:top_k]
+
+    all_basenames = [b for b in (extract_basename(x)
+                                 for x in (req.all_basenames or [])) if b]
 
     # decide how many to generate
     per_step = getattr(eng, "num_observations_per_step",
                        eng.num_observations_per_step)
     per_step += 1
-    n = min(req.n or len(basenames) or per_step, per_step)
+    n_requested = req.n if req and req.n else None
+    n = min(n_requested or per_step, per_step)
 
     # cache-buster round id
     round_id = int(asyncio.get_running_loop().time() * 1000)
 
-    print("Ranking received:", basenames, "n:", n, "round:", round_id)
+    print("Ranking received:", basenames, "all:",
+          all_basenames, "n:", n, "round:", round_id)
 
     # fire-and-forget generation; it must emit ("begin"/"slot"/"done") to SSE
-    asyncio.create_task(eng.next(basenames, round_id=round_id, limit=n))
+    asyncio.create_task(eng.next(basenames, round_id=round_id,
+                        limit=n, all_basenames=all_basenames))
 
     return JSONResponse({
         "round": round_id,
         "n": n,
         "accepted_ranking": basenames,
+        "all_basenames": all_basenames,
         "selected_basename": getattr(eng, "last_selected_basename", None),
     })
 
@@ -1728,6 +1754,7 @@ async def api_stage_status() -> JSONResponse:
     return JSONResponse({
         "stage": eng.stage_status(),
         "images": _list_image_urls(),
+        "top_k": getattr(eng, "top_k", None),
     })
 
 
@@ -1739,6 +1766,9 @@ async def api_stage_next(req: StageAdvanceRequest) -> JSONResponse:
 
     force_flag = bool(getattr(req, "force", False))
     basenames = [b for b in (extract_basename(x) for x in req.ranking) if b]
+    top_k = getattr(eng, "top_k", None)
+    if top_k and top_k > 0:
+        basenames = basenames[:top_k]
     advanced = await asyncio.to_thread(
         eng.next_stage_start, force=force_flag,
         ranking_basenames=basenames or None)
@@ -1760,6 +1790,7 @@ async def api_stage_next(req: StageAdvanceRequest) -> JSONResponse:
         "advanced": bool(advanced),
         "stage": eng.stage_status(),
         "images": _list_image_urls(),
+        "top_k": getattr(eng, "top_k", None),
     }
     if reason:
         payload["reason"] = reason
@@ -1875,5 +1906,5 @@ if __name__ == "__main__":
         print(f"[cli] Using config override: {CONFIG_FILE}")
 
     _register_shutdown_handlers()
-    uvicorn.run("server_bo:app", host="127.0.0.1",
+    uvicorn.run("server_bo_top:app", host="127.0.0.1",
                 port=args.port, reload=False)
