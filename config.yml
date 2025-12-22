@@ -1,8 +1,8 @@
 # config.yml
 
 # Inference GPU setting
-gpu_ids: 0,1
-# gpu_ids: 0,1,2,3
+# gpu_ids: 0,1
+gpu_ids: 0,1,2,3
 
 # Output path
 output_dir: "./outputs/"
