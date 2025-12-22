@@ -1435,12 +1435,18 @@ class Engine:
             "iteration": int(iteration),
         }
 
+        # Reset selection state for the upcoming iteration so UI starts empty
+        self.last_selected_basename = None
+
         # Tell clients a new round started
         await self._events.put(("begin", {
             "round": round_id,
             "n": n,
             "iteration": int(iteration),
             "stage": self.stage_status(),
+            "ranking_prompt": _ranking_prompt(getattr(self, "top_k", None)),
+            "selected": None,
+            "accepted_ranking": [],
         }))
 
         # Iterate and generate each slot given new_x
@@ -1666,6 +1672,7 @@ def start() -> JSONResponse:
     eng.start()
     gt_url = eng.get_gt_image_url()
     iteration = int(getattr(eng, "step", 0))
+    ranking_prompt = _ranking_prompt(getattr(eng, "top_k", None))
 
     MIN_COUNT = 1          # how many images make a “batch”
     WAIT_TIMEOUT = 120.0
@@ -1679,6 +1686,9 @@ def start() -> JSONResponse:
                 "gt_image": gt_url,
                 "iteration": iteration,
                 "top_k": getattr(eng, "top_k", None),
+                "ranking_prompt": ranking_prompt,
+                "accepted_ranking": [],
+                "selected_basename": None,
                 "stage": eng.stage_status(),
             }, headers={"Cache-Control": "no-store"})
         time.sleep(0.2)  # small sleep to avoid busy-wait
@@ -1690,6 +1700,9 @@ def start() -> JSONResponse:
         "gt_image": gt_url,
         "iteration": iteration,
         "top_k": getattr(eng, "top_k", None),
+        "ranking_prompt": ranking_prompt,
+        "accepted_ranking": [],
+        "selected_basename": None,
         "stage": eng.stage_status(),
     }, status_code=202)
 
@@ -1719,6 +1732,12 @@ def extract_basename(s: str) -> str | None:
         return None
     name = os.path.basename(u.path or "")
     return name.split("?")[0] if name else None
+
+
+def _ranking_prompt(top_k: int | None) -> str | None:
+    if top_k is None or top_k <= 0:
+        return None
+    return f"Select top {top_k} images"
 
 
 @app.post("/api/next")
@@ -1760,6 +1779,7 @@ async def next_step(req: NextRequest) -> JSONResponse:
         "accepted_ranking": basenames,
         "all_basenames": all_basenames,
         "selected_basename": getattr(eng, "last_selected_basename", None),
+        "ranking_prompt": _ranking_prompt(top_k),
     })
 
 
@@ -1770,6 +1790,7 @@ async def api_stage_status() -> JSONResponse:
         "stage": eng.stage_status(),
         "images": _list_image_urls(),
         "top_k": getattr(eng, "top_k", None),
+        "ranking_prompt": _ranking_prompt(getattr(eng, "top_k", None)),
     })
 
 
@@ -1806,6 +1827,7 @@ async def api_stage_next(req: StageAdvanceRequest) -> JSONResponse:
         "stage": eng.stage_status(),
         "images": _list_image_urls(),
         "top_k": getattr(eng, "top_k", None),
+        "ranking_prompt": _ranking_prompt(getattr(eng, "top_k", None)),
     }
     if reason:
         payload["reason"] = reason
@@ -1821,6 +1843,12 @@ async def events():
     async def gen():
         while True:
             kind, payload = await eng._events.get()   # must be a 2-tuple
+            if kind == "begin":
+                top_k = getattr(eng, "top_k", None)
+                payload = dict(payload)
+                payload.setdefault("ranking_prompt", _ranking_prompt(top_k))
+                payload.setdefault("selected", None)
+                payload.setdefault("accepted_ranking", [])
             yield f"event: {kind}\n".encode()
             yield f"data: {json.dumps(payload)}\n\n".encode()
             await asyncio.sleep(0)  # flush

@@ -1,4 +1,4 @@
-gpu_ids: 0,1
+gpu_ids: 0,1,2,3
 output_dir: /nfs/artemis.dgpsrv/ondemand29/chenxil/code/interactive-ranking/00_pilot/P01_tut/S1_T02
 num_observations: 5
 num_observations_per_step: 3
@@ -19,4 +19,4 @@ infer_steps: 20
 alpha_config: /scratch/ondemand29/chenxil/code/mood-board/search_benchmark/ld_experiments_1007/alpha_p1.yml
 example_path: /scratch/ondemand29/chenxil/data/civitai_sdxl_loras/
 stage_iterations:
-- 3
+- 4

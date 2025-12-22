@@ -49,4 +49,4 @@ example_path: '/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/'
 
 # Stage iterations
 stage_iterations:
-  - 3
+  - 4

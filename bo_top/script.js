@@ -508,8 +508,8 @@ function clampSelectionToLimit() {
 }
 
 function resetSelectionToCandidateOrder() {
-  const limit = getSelectionLimit();
-  selectedOrder = candidates.slice(0, limit).map((c) => c.canonical);
+  // Do not auto-select; start each round with an empty selection.
+  selectedOrder = [];
 }
 
 function getCandidateByCanonical(canonical) {
@@ -749,8 +749,16 @@ function renderRankingFromSelection({ showLoading = false } = {}) {
     rendered += 1;
   }
 
-  if (rankSection) rankSection.classList.toggle("hidden", rendered === 0);
-  if (nextWrap) nextWrap.classList.toggle("hidden", rendered === 0);
+  if (rendered === 0) {
+    const placeholder = document.createElement("div");
+    placeholder.className = "rank-placeholder";
+    const limit = topK && topK > 0 ? topK : null;
+    placeholder.textContent = limit ? `Select top ${limit} images` : "Select images to rank";
+    container.appendChild(placeholder);
+  }
+
+  if (rankSection) rankSection.classList.remove("hidden");
+  if (nextWrap) nextWrap.classList.remove("hidden");
   setTilesPerRow(rendered || 6);
   syncSafetyOverlays();
   syncSelectionStyles();

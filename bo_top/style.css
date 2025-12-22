@@ -531,7 +531,11 @@ body.no-scroll{
 }
 
 .grid-card{
-  flex: 1 1 clamp(280px, 34vw, 420px);
+  /* Force the full grid section to sit below the reference card instead of alongside it. */
+  flex: 1 1 100%;
+  max-width: 100%;
+  width: 100%;
+  order: 3;
   align-items: stretch;
 }
 

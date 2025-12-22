@@ -59,7 +59,8 @@ def export_engine_state(engine: "Engine") -> Dict[str, Any]:
 
     init_ready_ts = getattr(engine, "init_ready_timestamp", None)
     try:
-        init_ready_ts = float(init_ready_ts) if init_ready_ts is not None else None
+        init_ready_ts = float(
+            init_ready_ts) if init_ready_ts is not None else None
     except (TypeError, ValueError):
         init_ready_ts = None
 
@@ -173,11 +174,14 @@ def apply_engine_state(engine: "Engine", payload: Dict[str, Any], device: torch.
     if "dim2loras" in engine_payload and engine_payload.get("dim2loras") is not None:
         engine.dim2loras = engine_payload.get("dim2loras")
     if "lora_merge_indices" in engine_payload:
-        engine.lora_merge_indices = list(engine_payload.get("lora_merge_indices") or [])
+        engine.lora_merge_indices = list(
+            engine_payload.get("lora_merge_indices") or [])
     if "lora_merge_weights" in engine_payload:
-        engine.lora_merge_weights = list(engine_payload.get("lora_merge_weights") or [])
+        engine.lora_merge_weights = list(
+            engine_payload.get("lora_merge_weights") or [])
     if "dim_index_per_lora" in engine_payload:
-        engine.dim_index_per_lora = list(engine_payload.get("dim_index_per_lora") or [])
+        engine.dim_index_per_lora = list(
+            engine_payload.get("dim_index_per_lora") or [])
 
     engine.x_record = _dict_from_serialized(engine_payload.get("x_record", {}))
 
@@ -197,7 +201,8 @@ def apply_engine_state(engine: "Engine", payload: Dict[str, Any], device: torch.
     if comp_pairs_payload is not None:
         engine.comp_pairs = _to_tensor(comp_pairs_payload, device)
     else:
-        engine.comp_pairs = torch.empty((0, 2), dtype=torch.long, device=device)
+        engine.comp_pairs = torch.empty(
+            (0, 2), dtype=torch.long, device=device)
 
     engine.train_dataset_version = int(
         engine_payload.get("train_dataset_version", getattr(engine, "train_dataset_version", 0)))
@@ -250,11 +255,12 @@ def apply_engine_state(engine: "Engine", payload: Dict[str, Any], device: torch.
         engine.last_round_context = None
     engine.state_loaded = True
 
-        init_ready_ts = engine_payload.get("init_ready_timestamp")
-        try:
-            engine.init_ready_timestamp = float(init_ready_ts) if init_ready_ts is not None else None
-        except (TypeError, ValueError):
-            engine.init_ready_timestamp = None
+    init_ready_ts = engine_payload.get("init_ready_timestamp")
+    try:
+        engine.init_ready_timestamp = float(
+            init_ready_ts) if init_ready_ts is not None else None
+    except (TypeError, ValueError):
+        engine.init_ready_timestamp = None
 
     meta = payload.get("metadata", {})
     stage_index_value = engine_payload.get("stage_index")
@@ -316,7 +322,8 @@ def export_slider_state(engine: "Engine") -> Dict[str, Any]:
 
     init_ready_ts = getattr(engine, "init_ready_timestamp", None)
     try:
-        init_ready_ts = float(init_ready_ts) if init_ready_ts is not None else None
+        init_ready_ts = float(
+            init_ready_ts) if init_ready_ts is not None else None
     except (TypeError, ValueError):
         init_ready_ts = None
 
@@ -359,7 +366,8 @@ def load_slider_state(path: Path | str) -> Dict[str, Any]:
 
 def apply_slider_engine_state(engine: "Engine", payload: Dict[str, Any], device: torch.device) -> None:
     _ = device  # unused for slider state but retained for API compatibility
-    engine_payload = payload.get("engine", {}) if isinstance(payload, dict) else {}
+    engine_payload = payload.get(
+        "engine", {}) if isinstance(payload, dict) else {}
     if not isinstance(engine_payload, dict):
         engine_payload = {}
 
@@ -375,17 +383,21 @@ def apply_slider_engine_state(engine: "Engine", payload: Dict[str, Any], device:
             pass
 
     if "last_selected_basename" in engine_payload:
-        engine.last_selected_basename = engine_payload.get("last_selected_basename")
+        engine.last_selected_basename = engine_payload.get(
+            "last_selected_basename")
     if "component_weights" in engine_payload:
         engine.component_weights = engine_payload.get("component_weights", [])
     if "dim2loras" in engine_payload and engine_payload.get("dim2loras") is not None:
         engine.dim2loras = engine_payload.get("dim2loras")
     if "lora_merge_indices" in engine_payload:
-        engine.lora_merge_indices = list(engine_payload.get("lora_merge_indices") or [])
+        engine.lora_merge_indices = list(
+            engine_payload.get("lora_merge_indices") or [])
     if "lora_merge_weights" in engine_payload:
-        engine.lora_merge_weights = list(engine_payload.get("lora_merge_weights") or [])
+        engine.lora_merge_weights = list(
+            engine_payload.get("lora_merge_weights") or [])
     if "dim_index_per_lora" in engine_payload:
-        engine.dim_index_per_lora = list(engine_payload.get("dim_index_per_lora") or [])
+        engine.dim_index_per_lora = list(
+            engine_payload.get("dim_index_per_lora") or [])
 
     x_record_payload = engine_payload.get("x_record")
     if isinstance(x_record_payload, dict):
@@ -395,7 +407,8 @@ def apply_slider_engine_state(engine: "Engine", payload: Dict[str, Any], device:
     if isinstance(last_round_ctx, dict):
         normalized_ctx = dict(last_round_ctx)
         if "new_I" in normalized_ctx:
-            normalized_ctx["new_I"] = [int(i) for i in normalized_ctx.get("new_I", [])]
+            normalized_ctx["new_I"] = [
+                int(i) for i in normalized_ctx.get("new_I", [])]
         if "round" in normalized_ctx:
             try:
                 normalized_ctx["round"] = int(normalized_ctx["round"])
@@ -413,17 +426,20 @@ def apply_slider_engine_state(engine: "Engine", payload: Dict[str, Any], device:
     slider_payload = engine_payload.get("slider_history")
     if slider_payload is None and isinstance(payload, dict):
         slider_payload = payload.get("slider_history")
-    apply_slider_history(engine, slider_payload if isinstance(slider_payload, list) else None)
+    apply_slider_history(engine, slider_payload if isinstance(
+        slider_payload, list) else None)
 
     init_ready_ts = engine_payload.get("init_ready_timestamp")
     try:
-        engine.init_ready_timestamp = float(init_ready_ts) if init_ready_ts is not None else None
+        engine.init_ready_timestamp = float(
+            init_ready_ts) if init_ready_ts is not None else None
     except (TypeError, ValueError):
         engine.init_ready_timestamp = None
 
     if "stage_index" in engine_payload:
         try:
-            engine.stage_index = max(0, int(engine_payload.get("stage_index", engine.stage_index)))
+            engine.stage_index = max(
+                0, int(engine_payload.get("stage_index", engine.stage_index)))
         except Exception:
             pass
 
