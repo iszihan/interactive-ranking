@@ -30,7 +30,8 @@ from diffusers.utils import load_image
 from PIL import Image
 
 from helper.infer import infer
-from engine import (obj_sim, infer_image_img2img, infer_image, check_nsfw_images)
+from engine import (obj_sim, infer_image_img2img,
+                    infer_image, check_nsfw_images)
 from demographics import Demographics
 
 from async_multi_gpu_pool import MultiGPUInferPool
@@ -322,7 +323,7 @@ class Engine:
         else:
             self.control_img = np.array(load_image(str(control_img_path)))
             print(f'Loaded control image from {control_img_path}')
-            
+
         pl.seed_everything(self.seed)
         self.control_img_path = str(control_img_path)
 
@@ -439,7 +440,8 @@ class Engine:
 
     def get_slider_iteration(self) -> int:
         """Return the zero-based iteration index inferred from history/state."""
-        history_len = len(self.slider_history) if isinstance(self.slider_history, list) else 0
+        history_len = len(self.slider_history) if isinstance(
+            self.slider_history, list) else 0
         computed = max(0, history_len - 1) if history_len else 0
         current = int(getattr(self, "step", 0) or 0)
         if computed > current:
@@ -736,7 +738,7 @@ class Engine:
         # default to False (blur) if checker failed to return
         if is_safe is None:
             is_safe = False
-            
+
         print(f'is_safe: {is_safe}')
 
         payload = {
@@ -755,6 +757,7 @@ class Engine:
 
 
 engine: Engine | None = None
+
 
 def _require_engine() -> Engine:
     if engine is None:
@@ -820,7 +823,8 @@ def _load_slider_checkpoint(eng: Engine, *, path: Path | str | None = None,
 
 app.mount(
     "/static", StaticFiles(directory=str(FRONTEND_DIR / "sliders")), name="static")
-app.mount("/description", StaticFiles(directory=str(DESCRIPTION_DIR)), name="description")
+app.mount("/description", StaticFiles(directory=str(DESCRIPTION_DIR)),
+          name="description")
 app.mount("/tutorial", StaticFiles(directory=str(TUTORIAL_DIR)), name="tutorial")
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 app.mount("/slots", StaticFiles(directory=str(SLOTS_DIR)), name="slots")
@@ -902,8 +906,10 @@ async def api_recall_state(payload: dict | None = Body(default=None)) -> JSONRes
 
 def _list_image_urls() -> List[Dict[str, Any]]:
     exts = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
-    slots = [p for p in SLOTS_DIR.iterdir() if p.suffix.lower() in exts and p.is_file()]
-    outputs = [p for p in OUTPUT_DIR.iterdir() if p.suffix.lower() in exts and p.is_file()]
+    slots = [p for p in SLOTS_DIR.iterdir() if p.suffix.lower()
+             in exts and p.is_file()]
+    outputs = [p for p in OUTPUT_DIR.iterdir() if p.suffix.lower()
+               in exts and p.is_file()]
 
     # Include both current slots (active round) and historical outputs so the
     # slider UI can resolve safety for latest renders and history entries.
@@ -932,7 +938,8 @@ def _list_image_urls() -> List[Dict[str, Any]]:
             nsfw_hits = check_nsfw_images(pil_batch)
             # nsfw_hits = [False] * len(pil_batch)  # Placeholder: assume all safe
             if len(nsfw_hits) != len(eval_paths):
-                print(f"[safety] Warning: expected {len(eval_paths)} safety results, got {len(nsfw_hits)}")
+                print(
+                    f"[safety] Warning: expected {len(eval_paths)} safety results, got {len(nsfw_hits)}")
             for idx, path in enumerate(eval_paths):
                 if idx < len(nsfw_hits):
                     safety_map[path] = not bool(nsfw_hits[idx])
@@ -1226,6 +1233,8 @@ if __name__ == "__main__":
                         help="Path to config file override")
     parser.add_argument("--port", dest="port", type=int, default=8000,
                         help="Port to bind the server (default: 8000)")
+    parser.add_argument("--ssh", action="store_true",
+                        help="Enable SSH tunneling (not implemented)")
     args = parser.parse_args()
 
     if args.state_path:
@@ -1245,7 +1254,8 @@ if __name__ == "__main__":
         DEMO_PARTICIPANT_ID = args.demographic
         os.environ["DEMOGRAPHIC_ENABLED"] = "1"
         os.environ["DEMOGRAPHIC_PARTICIPANT_ID"] = DEMO_PARTICIPANT_ID
-        print(f"[cli] Demographic collection enabled for participant: {DEMO_PARTICIPANT_ID}")
+        print(
+            f"[cli] Demographic collection enabled for participant: {DEMO_PARTICIPANT_ID}")
 
     if args.config_path:
         config_override = Path(args.config_path).expanduser()
@@ -1254,4 +1264,5 @@ if __name__ == "__main__":
         print(f"[cli] Using config override: {CONFIG_FILE}")
 
     _register_shutdown_handlers()
-    uvicorn.run("server_slider:app", host="127.0.0.1", port=args.port, reload=False)
+    host = "127.0.0.1" if not args.ssh else "0.0.0.0"
+    uvicorn.run("server_slider:app", host=host, port=args.port, reload=False)

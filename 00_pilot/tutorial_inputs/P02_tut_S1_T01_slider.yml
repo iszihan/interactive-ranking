@@ -2,7 +2,7 @@ gpu_ids: 0
 num_observations: 5
 num_observations_per_step: 3
 max_num_observations: 20
-init_dir: /scratch/ondemand29/chenxil/code/interactive-ranking/00_pilot/P02_tut/init_S1_T01
+init_dir: /nfs/artemis.dgpsrv/ondemand29/chenxil/code/interactive-ranking/00_pilot/P02_tut/init_S1_T01
 seed: 1
 beta: 1.0
 gt_config: '''A drawing of a ship''@/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/838909.safetensors:0.21,/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/661736.safetensors:0.22,/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/74776.safetensors:0,/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/154792.safetensors:0.22,/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/453731.safetensors:0'
@@ -15,4 +15,4 @@ infer_height: 1024
 infer_steps: 30
 alpha_config: /scratch/ondemand29/chenxil/code/mood-board/search_benchmark/ld_experiments_1007/alpha_p1.yml
 example_path: /scratch/ondemand29/chenxil/data/civitai_sdxl_loras/
-output_dir: /scratch/ondemand29/chenxil/code/interactive-ranking/00_pilot/P02_tut/S1_T01
+output_dir: /nfs/artemis.dgpsrv/ondemand29/chenxil/code/interactive-ranking/00_pilot/P02_tut/S1_T01

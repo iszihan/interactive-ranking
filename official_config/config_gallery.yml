@@ -6,7 +6,7 @@ gpu_ids: 0,1,2,3
 
 # How many observations to use for the initial phase
 # num_observations: 10
-num_observations: 3
+num_observations: 5
 num_observations_per_step: 9
 
 # Hard upper bound you enforce later

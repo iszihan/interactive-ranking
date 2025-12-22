@@ -1846,6 +1846,8 @@ if __name__ == "__main__":
                         help="Path to config file override")
     parser.add_argument("--port", dest="port", type=int, default=8000,
                         help="Port to bind the server (default: 8000)")
+    parser.add_argument("--ssh", action="store_true",
+                        help="Enable SSH tunneling (not implemented)")
     args = parser.parse_args()
 
     if args.state_path:
@@ -1875,5 +1877,5 @@ if __name__ == "__main__":
         print(f"[cli] Using config override: {CONFIG_FILE}")
 
     _register_shutdown_handlers()
-    uvicorn.run("server_bo:app", host="127.0.0.1",
-                port=args.port, reload=False)
+    host = "127.0.0.1" if not args.ssh else "0.0.0.0"
+    uvicorn.run("server_bo:app", host=host, port=args.port, reload=False)
