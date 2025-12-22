@@ -435,6 +435,7 @@ class Engine:
         self.last_past_indices = []
         self.ranking_history: list[dict] = []
         self.last_round_context: dict | None = None
+        self.init_ready_timestamp: float | None = None
 
     def _make_worker_state_template(self) -> dict:
         return {
@@ -783,6 +784,8 @@ class Engine:
 
         print("Warming up GPU pool...")
         self._warmup_gpu_pool()
+
+        self.init_ready_timestamp = time.time()
 
         print("Engine started.")
         self.save_state(reason="start")

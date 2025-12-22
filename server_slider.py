@@ -384,6 +384,7 @@ class Engine:
         self.x_record = {}
         self.last_round_context: dict | None = None
         self.slider_history: list[dict] = []
+        self.init_ready_timestamp: float | None = None
 
     def _make_worker_state_template(self) -> dict:
         return {
@@ -677,6 +678,8 @@ class Engine:
 
         print("Warming up GPU pool...")
         self._warmup_gpu_pool()
+
+        self.init_ready_timestamp = time.time()
 
         print("Engine started.")
         _save_slider_checkpoint(self, reason="start")

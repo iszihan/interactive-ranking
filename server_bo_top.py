@@ -453,6 +453,7 @@ class Engine:
         self.last_past_indices = []
         self.ranking_history: list[dict] = []
         self.last_round_context: dict | None = None
+        self.init_ready_timestamp: float | None = None
 
     def _archive_current_train_dataset(self, reason: str | None = None) -> None:
         """Persist the active train_X/Y tensors before rebuilding them."""
@@ -819,6 +820,8 @@ class Engine:
         print("Warming up GPU pool...")
         self._warmup_gpu_pool()
 
+        self.init_ready_timestamp = time.time()
+        
         print("Engine started.")
         self.save_state(reason="start")
 
@@ -1140,15 +1143,22 @@ class Engine:
         qmc_sampler = SobolQMCNormalSampler(
             sample_shape=torch.Size([self.MC_SAMPLES]))
         acq_function = qUpperConfidenceBound(
-            model=gp,
-            beta=self.beta,
-            sampler=qmc_sampler       # reuse your existing QMC sampler
-        )
-        final_acq_function = qSimplexUpperConfidenceBound(
-            model=gp,
-            beta=self.beta,
-            sampler=qmc_sampler
-        )
+                model=gp,
+                beta=self.beta,
+                sampler=qmc_sampler       # reuse your existing QMC sampler
+            )
+        if self.stage_index == 0:
+            final_acq_function = qSimplexUpperConfidenceBound(
+                model=gp,
+                beta=self.beta,
+                sampler=qmc_sampler
+            )
+        else:
+            final_acq_function = qUpperConfidenceBound(
+                model=gp,
+                beta=self.beta,
+                sampler=qmc_sampler       # reuse your existing QMC sampler
+            )
 
         eps = 1e-4  # small buffer away from 0/1 in parameter space
 
@@ -1182,11 +1192,14 @@ class Engine:
             raw_samples=raw_samples,
             generator=generator
         )
-        # Inverse stick-breaking: coeffs -> parameter space V in [0,1]
-        Xinit = inverse_stick_breaking_transform(Xinit_coeff)
+        if self.stage_index == 0:
+            # Inverse stick-breaking: coeffs -> parameter space V in [0,1]
+            Xinit = inverse_stick_breaking_transform(Xinit_coeff)
 
-        # Clamp initial conditions away from hard boundaries for stability
-        Xinit = Xinit.clamp(min=eps, max=1 - eps)
+            # Clamp initial conditions away from hard boundaries for stability
+            Xinit = Xinit.clamp(min=eps, max=1 - eps)
+        else:
+            Xinit = Xinit_coeff
 
         end_time = time.time()
         print(
@@ -1194,10 +1207,11 @@ class Engine:
 
         # --- 3. Parameter-space bounds for L-BFGS (shrunken) ---
         param_bounds = coeff_bounds.clone()
-        param_bounds[0, :] = param_bounds[0, :] + \
-            eps      # lower bounds += eps
-        param_bounds[1, :] = param_bounds[1, :] - \
-            eps      # upper bounds -= eps
+        if self.stage_index == 0:
+            param_bounds[0, :] = param_bounds[0, :] + \
+                eps      # lower bounds += eps
+            param_bounds[1, :] = param_bounds[1, :] - \
+                eps      # upper bounds -= eps
 
         start_time = time.time()
         new_x_ei, _ = optimize_acqf(
@@ -1215,15 +1229,17 @@ class Engine:
 
         # Clamp once more just in case optimizer wandered numerically
         # new_x_ei = new_x_ei.clamp(min=eps_round, max=1 - eps_round)
-        eps_round = eps + 1e-6
-        new_x_ei[new_x_ei <= eps_round] = 0
-        new_x_ei[new_x_ei >= 1 - eps_round] = 1
+        if self.stage_index == 0:
+            eps_round = eps + 1e-6
+            new_x_ei[new_x_ei <= eps_round] = 0
+            new_x_ei[new_x_ei >= 1 - eps_round] = 1
 
-        # --- 4. Map optimized parameters -> coefficients via stick breaking ---
-        new_x_ei = stick_breaking_transform(new_x_ei)
+            # --- 4. Map optimized parameters -> coefficients via stick breaking ---
+            new_x_ei = stick_breaking_transform(new_x_ei)
 
-        new_x_ei[new_x_ei <= eps_round] = 0
-        new_x_ei[new_x_ei >= 1 - eps_round] = 1
+            new_x_ei[new_x_ei <= eps_round] = 0
+            new_x_ei[new_x_ei >= 1 - eps_round] = 1
+
         print(f"new_x_ei: {new_x_ei}")
 
         return new_x_ei

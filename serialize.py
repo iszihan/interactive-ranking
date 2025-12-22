@@ -57,6 +57,12 @@ def export_engine_state(engine: "Engine") -> Dict[str, Any]:
         obs_train = None
         obs_y = None
 
+    init_ready_ts = getattr(engine, "init_ready_timestamp", None)
+    try:
+        init_ready_ts = float(init_ready_ts) if init_ready_ts is not None else None
+    except (TypeError, ValueError):
+        init_ready_ts = None
+
     history_payload: list[Dict[str, Any]] = []
     for item in getattr(engine, "ranking_history", []) or []:
         if not isinstance(item, dict):
@@ -127,6 +133,7 @@ def export_engine_state(engine: "Engine") -> Dict[str, Any]:
             "ranking_history": history_payload,
             "last_round_context": getattr(engine, "last_round_context", None),
             "stage_index": getattr(engine, "stage_index", 0),
+            "init_ready_timestamp": init_ready_ts,
         }
     }
     return state
@@ -243,6 +250,12 @@ def apply_engine_state(engine: "Engine", payload: Dict[str, Any], device: torch.
         engine.last_round_context = None
     engine.state_loaded = True
 
+        init_ready_ts = engine_payload.get("init_ready_timestamp")
+        try:
+            engine.init_ready_timestamp = float(init_ready_ts) if init_ready_ts is not None else None
+        except (TypeError, ValueError):
+            engine.init_ready_timestamp = None
+
     meta = payload.get("metadata", {})
     stage_index_value = engine_payload.get("stage_index")
     if stage_index_value is not None:
@@ -301,6 +314,12 @@ def export_slider_state(engine: "Engine") -> Dict[str, Any]:
         "step": getattr(engine, "step", 0),
     }
 
+    init_ready_ts = getattr(engine, "init_ready_timestamp", None)
+    try:
+        init_ready_ts = float(init_ready_ts) if init_ready_ts is not None else None
+    except (TypeError, ValueError):
+        init_ready_ts = None
+
     engine_payload: Dict[str, Any] = {
         "step": getattr(engine, "step", 0),
         "seed": getattr(engine, "seed", 0),
@@ -314,6 +333,7 @@ def export_slider_state(engine: "Engine") -> Dict[str, Any]:
         "last_round_context": getattr(engine, "last_round_context", None),
         "stage_index": getattr(engine, "stage_index", 0),
         "slider_history": export_slider_history(engine),
+        "init_ready_timestamp": init_ready_ts,
     }
 
     return {
@@ -394,6 +414,12 @@ def apply_slider_engine_state(engine: "Engine", payload: Dict[str, Any], device:
     if slider_payload is None and isinstance(payload, dict):
         slider_payload = payload.get("slider_history")
     apply_slider_history(engine, slider_payload if isinstance(slider_payload, list) else None)
+
+    init_ready_ts = engine_payload.get("init_ready_timestamp")
+    try:
+        engine.init_ready_timestamp = float(init_ready_ts) if init_ready_ts is not None else None
+    except (TypeError, ValueError):
+        engine.init_ready_timestamp = None
 
     if "stage_index" in engine_payload:
         try:

@@ -453,6 +453,7 @@ class Engine:
         self.last_past_indices = []
         self.ranking_history: list[dict] = []
         self.last_round_context: dict | None = None
+        self.init_ready_timestamp: float | None = None
 
     def _archive_current_train_dataset(self, reason: str | None = None) -> None:
         """Persist the active train_X/Y tensors before rebuilding them."""
@@ -815,9 +816,10 @@ class Engine:
         os.makedirs(self.init_dir, exist_ok=True)
 
         self.construct_init_samples()
-
         print("Warming up GPU pool...")
         self._warmup_gpu_pool()
+
+        self.init_ready_timestamp = time.time()
 
         print("Engine started.")
         self.save_state(reason="start")
