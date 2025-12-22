@@ -13,6 +13,8 @@ num_observations: 5
 num_observations_per_step: 3
 sample_past_n: 2
 
+top_k: 5
+
 # Hard upper bound you enforce later
 max_num_observations: 20
 
