@@ -51,7 +51,6 @@ from PIL import Image, ImageDraw
 import numpy as np
 import uvicorn
 from diffusers.utils import load_image
-import pySequentialLineSearch
 sys.path.append('/scratch/ondemand29/chenxil/code/mood-board')
 
 

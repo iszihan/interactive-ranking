@@ -445,6 +445,7 @@ def main(
     templates: List[str],
     participants: Optional[int] = None,
     tutorial: bool = False,
+    offset: int = 0,
     shuffle_weights: bool = True,
     seed: int = 0,
 ):
@@ -495,6 +496,18 @@ def main(
     output_parent = os.path.dirname(os.path.abspath(out_dir))
     rng = random.Random(seed)
 
+    # Common prompt filter keywords (skip any prompt containing one of these substrings)
+    filter_keywords = ["rose", "woman", "cat", "bottle", "boy"]
+
+    def is_filtered(prompt: str) -> bool:
+        lower = prompt.lower()
+        return any(kw in lower for kw in filter_keywords)
+
+    # Pair prompts and weights once, shuffle, then filter.
+    paired_entries = list(zip(prompts, combos))
+    rng.shuffle(paired_entries)
+    filtered_entries = [(p, w) for p, w in paired_entries if not is_filtered(p)]
+
     if tutorial:
         if participants is None:
             participants_count = 1
@@ -503,26 +516,19 @@ def main(
                 raise ValueError("--par must be positive when provided.")
             participants_count = participants
 
-        # Reserve the first study-sized block of inputs for the actual sessions
-        # so tutorial pulls from the remaining pool.
-        reserve_for_study = participants_count * SESSIONS_PER_PARTICIPANT * TASKS_PER_SESSION
+        if offset < 0:
+            raise ValueError("--offset must be non-negative.")
 
-        if available < reserve_for_study + len(template_specs):
+        # Tutorial should consume prompts after skipping the regular portion.
+        tutorial_pool = filtered_entries[offset:]
+
+        if len(tutorial_pool) < len(template_specs):
             raise ValueError(
-                f"Tutorial mode needs at least {reserve_for_study + len(template_specs)} prompt/weight pairs; only {available} available.")
+                f"Not enough prompts after filtering and offset to cover all templates. "
+                f"Needed {len(template_specs)}, found {len(tutorial_pool)} after skipping {offset}."
+            )
 
-        base_entries = list(zip(prompts, combos))
-        # filter_keywords = [" rose", " woman", " cat", " bottle"]
-        # base_entries = [
-        #     entry for entry in base_entries
-        #     if not any(kw in entry[0].lower() for kw in filter_keywords)
-        # ]
-        # print(base_entries)
-        # exit()
-        rng.shuffle(base_entries)
-        base_entries = base_entries[reserve_for_study:]
-
-        chosen = base_entries[: len(template_specs)]
+        chosen = tutorial_pool[: len(template_specs)]
         interface_gt = {name: pw for (name, _), pw in zip(template_specs, chosen)}
 
         # Tutorial: single session, fixed interface order for all participants
@@ -566,14 +572,13 @@ def main(
     participants_count = infer_participants_count(available, participants)
     total_needed = participants_count * SESSIONS_PER_PARTICIPANT * TASKS_PER_SESSION
 
-    if available < total_needed:
+    if len(filtered_entries) < total_needed:
         raise ValueError(
-            f"Need {total_needed} prompts/weights for par={participants_count} but only {available} are available.")
+            f"Not enough prompts after filtering to build the task plan. "
+            f"Needed {total_needed}, found {len(filtered_entries)} after filtering."
+        )
 
-    gt_entries = list(zip(prompts, combos))  # zip truncates to the min length
-
-    rng.shuffle(gt_entries)
-    gt_entries = gt_entries[:total_needed]
+    gt_entries = filtered_entries[:total_needed]
 
     task_plan = build_task_plan(participants_count, template_specs, seed)
 
@@ -633,6 +638,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Generate tutorial configs: pick one prompt/weight per interface, reuse across participants, still writing per-session folders.",
     )
+    parser.add_argument(
+        "--offset",
+        type=int,
+        default=0,
+        help="When --tutorial is set, skip this many filtered prompt-weight pairs (e.g., the number consumed by the regular run) before selecting tutorial prompts.",
+    )
     parser.add_argument("--no-shuffle", action="store_true",
                         help="Do not shuffle generated weight combinations.")
     parser.add_argument("--seed", type=int, default=0,
@@ -646,6 +657,7 @@ if __name__ == "__main__":
         templates=args.templates,
         participants=args.par,
         tutorial=args.tutorial,
+        offset=args.offset,
         shuffle_weights=not args.no_shuffle,
         seed=args.seed,
     )

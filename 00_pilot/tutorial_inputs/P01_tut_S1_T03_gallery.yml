@@ -5,7 +5,7 @@ max_num_observations: 20
 init_dir: /nfs/artemis.dgpsrv/ondemand29/chenxil/code/interactive-ranking/00_pilot/P01_tut/init_S1_T03
 seed: 1
 beta: 1.0
-gt_config: '''A portrait of a boy''@/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/838909.safetensors:0.2,/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/661736.safetensors:0.21,/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/74776.safetensors:0.29,/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/154792.safetensors:0,/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/453731.safetensors:0.25'
+gt_config: '''A drawing of a car''@/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/838909.safetensors:0.29,/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/661736.safetensors:0.42,/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/74776.safetensors:0.73,/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/154792.safetensors:0,/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/453731.safetensors:0'
 negative_prompt: easynegative, 3d, realistic, badhandv4, (lowres,  bad quality),  (worst
   quality,  low quality:1.3),  blurry,  cropped,  out of frame,  border,  bad hands,  interlocked
   fingers,  mutated hands,  (Bad anatomy:1.4),  from afar,  warped,  (deformed,  disfigured:1.1),  twisted
