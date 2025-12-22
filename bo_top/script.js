@@ -52,6 +52,23 @@ let candidates = [];
 let selectedOrder = [];
 let zoomedBrick = null;
 
+// Keep the grid label in sync with the current topK value (or fall back).
+function updateGridLabel() {
+  if (!gridLabel) return;
+  const label = topK && topK > 0
+    ? `All images (right-click to select the top ${topK})`
+    : "All images (right-click to select)";
+  gridLabel.textContent = label;
+}
+
+// Allow a query param ?top_k= to set the initial label immediately (useful when
+// the API response arrives later or is cached).
+const initialTopKParam = Number(new URLSearchParams(window.location.search).get("top_k"));
+if (Number.isFinite(initialTopKParam) && initialTopKParam > 0) {
+  topK = Math.floor(initialTopKParam);
+}
+updateGridLabel();
+
 function setBodyScrollLock(locked) {
   document.body.classList.toggle("no-scroll", Boolean(locked));
 }
@@ -469,12 +486,7 @@ function setTopKValue(value) {
   topK = Number.isFinite(numeric) && numeric > 0 ? Math.floor(numeric) : null;
   clampSelectionToLimit();
   updateRankMidLabel();
-  if (gridLabel) {
-    const label = topK && topK > 0
-      ? `All images (right-click to select the top ${topK})`
-      : "All images (right-click to select)";
-    gridLabel.textContent = label;
-  }
+  updateGridLabel();
   updateActionButtons();
 }
 
