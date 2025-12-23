@@ -799,6 +799,7 @@ class Engine:
 
         print('Starting with initial images...')
         if self.init_dir is not None:
+            os.makedirs(self.init_dir, exist_ok=True)
             src_dir = Path(self.init_dir)
         else:
             src_dir = WORKING_DIR
