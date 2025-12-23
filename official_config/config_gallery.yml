@@ -4,27 +4,21 @@
 # gpu_ids: 0,1
 gpu_ids: 0,1,2,3
 
-# Output path
-output_dir: "./outputs/"
-
 # How many observations to use for the initial phase
 # num_observations: 10
 num_observations: 5
-num_observations_per_step: 3
-sample_past_n: 2
-
-top_k: 5
+num_observations_per_step: 9
 
 # Hard upper bound you enforce later
 max_num_observations: 20
 
 # Optional: directory with any initial assets/records you want to load
-init_dir: "./init_candidates"
+init_dir: "./init_candidates_plane"
 
 # Global RNG seed used when step == 0
 seed: 1
 
-beta: 9.0
+beta: 1.0
 
 # Ground-truth spec:
 #   "<prompt text>@<component_a>:<weight_a>, <component_b>:<weight_b>, ..."
@@ -39,14 +33,9 @@ negative_prompt: "easynegative, 3d, realistic, badhandv4, (lowres,  bad quality)
 # Inference settings (used for both control and GT generation)
 infer_width: 1024
 infer_height: 1024
-# infer_steps: 30
-infer_steps: 20
+infer_steps: 30
 
 alpha_config: '/scratch/ondemand29/chenxil/code/mood-board/search_benchmark/ld_experiments_1007/alpha_p1.yml'
 
 # Example image path
 example_path: '/scratch/ondemand29/chenxil/data/civitai_sdxl_loras/'
-
-# Stage iterations
-stage_iterations:
-  - 4

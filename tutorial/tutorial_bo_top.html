@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<title>BO-Top Tutorial</title>
+	<style>
+		:root{
+			color-scheme: light;
+		}
+		body{
+			margin: 0;
+			font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+			background: #f5f6fb;
+			color: #101528;
+		}
+		.wrapper{
+			max-width: 960px;
+			margin: 0 auto;
+			padding: 36px clamp(18px, 4vw, 48px) 48px;
+			display: flex;
+			flex-direction: column;
+			gap: 28px;
+		}
+		h2{
+			margin: 0 0 12px;
+			font-size: clamp(1.25rem, 2.4vw, 1.8rem);
+			color: #252b4d;
+		}
+		p{
+			margin: 0 0 10px;
+			line-height: 1.65;
+		}
+		ul{
+			margin: 0 0 12px 20px;
+			padding: 0;
+			line-height: 1.6;
+		}
+		.section{
+			background: #fff;
+			border-radius: 20px;
+			padding: 24px clamp(18px, 3vw, 32px);
+			box-shadow: 0 20px 50px rgba(15, 20, 48, 0.08);
+		}
+		.section + .section{
+			opacity: 0.97;
+		}
+		.section strong{
+			color: #1d2a66;
+		}
+		.demo-figure{
+			margin: 16px 0 0;
+			border-radius: 18px;
+			overflow: hidden;
+			box-shadow: inset 0 0 0 1px rgba(16, 21, 40, 0.08);
+		}
+		.demo-figure.is-overview{
+			max-width: min(640px, 90%);
+			margin-left: auto;
+			margin-right: auto;
+		}
+		.demo-figure.is-zoom{
+			max-width: min(520px, 80%);
+			margin-left: auto;
+			margin-right: auto;
+		}
+		.demo-figure img{
+			width: 100%;
+			display: block;
+		}
+		.footer-note{
+			text-align: center;
+			font-weight: 600;
+			color: #37406b;
+		}
+	</style>
+</head>
+<body>
+	<div class="wrapper">
+		<section class="section">
+			<h2>1. Interface Overview</h2>
+			<p>This interface combines <strong>image selection</strong> and <strong>ranking</strong>.</p>
+			<div class="demo-figure is-overview">
+				<img src="overview_bo_top.jpg" alt="Annotated overview of the BO-Top interface" loading="lazy" />
+			</div>
+			<ul>
+				<li>An <strong>iteration counter</strong> in the top-left shows your current progress.</li>
+				<li>The <strong>reference image</strong> at the top is labeled <em>“Match this image”</em>.</li>
+				<li>The <strong>Selected image</strong> panel shows the candidate you are currently inspecting.</li>
+				<li>The <strong>All images</strong> row lists every candidate available this iteration.</li>
+				<li>The <strong>Rank top 5</strong> area displays the images you have chosen to rank, ordered from <strong>Closest</strong> (left) to <strong>Farthest</strong> (right).</li>
+				<li>The <strong>Next</strong> button at the bottom moves you forward after you complete your ranking.</li>
+				<li>The <strong>Task Description</strong> and <strong>Tutorial</strong> buttons in the bottom-right let you revisit instructions at any time.</li>
+			</ul>
+		</section>
+
+		<section class="section">
+			<h2>2. Image Zoom-In</h2>
+			<p>You can zoom in to inspect images more closely.</p>
+			<ul>
+				<li>Click any candidate image to view it enlarged in the <strong>Selected image</strong> panel.</li>
+				<li>The zoomed view updates automatically whenever you click a different candidate.</li>
+			</ul>
+			<div class="demo-figure is-zoom">
+				<img src="zoomin_top.gif" alt="Animation demonstrating zooming a candidate image" loading="lazy" />
+			</div>
+		</section>
+
+		<section class="section">
+			<h2>3. Image Selection and De-selection</h2>
+			<p>Your first step is to choose up to <strong>five</strong> images for ranking.</p>
+			<ul>
+				<li>In the <em>All images</em> row, <strong>right-click</strong> an image to add it to the <em>Rank top 5</em> selection.</li>
+				<li>Selected images appear in the ranking row. Right-click again to remove one.</li>
+				<li>You can adjust your selection at any time before proceeding.</li>
+				<li>Only images in the <em>Rank top 5</em> row will be ranked.</li>
+			</ul>
+			<div class="demo-figure">
+				<img src="select.gif" alt="Animation showing selecting and deselecting images" loading="lazy" />
+			</div>
+		</section>
+
+		<section class="section">
+			<h2>4. Ranking Images and Moving Forward</h2>
+			<p>After selecting up to five images:</p>
+			<ul>
+				<li>Compare each candidate to the reference based on <strong>overall visual appearance and style</strong>.</li>
+				<li>Arrange them from <strong>most similar (Closest)</strong> on the left to <strong>least similar (Farthest)</strong> on the right.</li>
+				<li>If two feel equally similar, place the one that seems slightly closer overall toward the left.</li>
+				<li>When satisfied with the order, click <strong>Next</strong> to proceed to the next iteration.</li>
+			</ul>
+			<div class="demo-figure">
+				<img src="rank.gif" alt="Animation showing ranking interactions" loading="lazy" />
+			</div>
+		</section>
+
+		<section class="section">
+			<h2>5. Instructions</h2>
+			<p>The task description and this interface tutorial are available at any time.</p>
+			<p>To access them, click the buttons located in the <strong>bottom-right corner</strong> of the interface.</p>
+		</section>
+
+		<p class="footer-note">Use this tutorial as a quick refresher whenever you need it.</p>
+	</div>
+</body>
+</html>

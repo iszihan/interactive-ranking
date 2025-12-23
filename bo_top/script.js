@@ -16,6 +16,7 @@ const zoomSection = document.getElementById("zoomSection");
 const zoomImg = document.getElementById("zoomImg");
 const zoomBrick = document.querySelector(".zoom-brick");
 const zoomSafetyOverlay = document.getElementById("zoomSafetyOverlay");
+const gridLabel = document.getElementById("gridLabel");
 const gridSection = document.getElementById("gridSection");
 const gridContainer = document.getElementById("gridContainer");
 const descriptionToggle = document.getElementById("descriptionToggle");
@@ -50,6 +51,23 @@ let topK = null;
 let candidates = [];
 let selectedOrder = [];
 let zoomedBrick = null;
+
+// Keep the grid label in sync with the current topK value (or fall back).
+function updateGridLabel() {
+  if (!gridLabel) return;
+  const label = topK && topK > 0
+    ? `All images (right-click to select the top ${topK})`
+    : "All images (right-click to select)";
+  gridLabel.textContent = label;
+}
+
+// Allow a query param ?top_k= to set the initial label immediately (useful when
+// the API response arrives later or is cached).
+const initialTopKParam = Number(new URLSearchParams(window.location.search).get("top_k"));
+if (Number.isFinite(initialTopKParam) && initialTopKParam > 0) {
+  topK = Math.floor(initialTopKParam);
+}
+updateGridLabel();
 
 function setBodyScrollLock(locked) {
   document.body.classList.toggle("no-scroll", Boolean(locked));
@@ -468,6 +486,7 @@ function setTopKValue(value) {
   topK = Number.isFinite(numeric) && numeric > 0 ? Math.floor(numeric) : null;
   clampSelectionToLimit();
   updateRankMidLabel();
+  updateGridLabel();
   updateActionButtons();
 }
 
@@ -489,8 +508,8 @@ function clampSelectionToLimit() {
 }
 
 function resetSelectionToCandidateOrder() {
-  const limit = getSelectionLimit();
-  selectedOrder = candidates.slice(0, limit).map((c) => c.canonical);
+  // Do not auto-select; start each round with an empty selection.
+  selectedOrder = [];
 }
 
 function getCandidateByCanonical(canonical) {
@@ -730,8 +749,16 @@ function renderRankingFromSelection({ showLoading = false } = {}) {
     rendered += 1;
   }
 
-  if (rankSection) rankSection.classList.toggle("hidden", rendered === 0);
-  if (nextWrap) nextWrap.classList.toggle("hidden", rendered === 0);
+  if (rendered === 0) {
+    const placeholder = document.createElement("div");
+    placeholder.className = "rank-placeholder";
+    const limit = topK && topK > 0 ? topK : null;
+    placeholder.textContent = limit ? `Select top ${limit} images` : "Select images to rank";
+    container.appendChild(placeholder);
+  }
+
+  if (rankSection) rankSection.classList.remove("hidden");
+  if (nextWrap) nextWrap.classList.remove("hidden");
   setTilesPerRow(rendered || 6);
   syncSafetyOverlays();
   syncSelectionStyles();

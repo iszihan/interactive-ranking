@@ -435,6 +435,7 @@ class Engine:
         self.last_past_indices = []
         self.ranking_history: list[dict] = []
         self.last_round_context: dict | None = None
+        self.init_ready_timestamp: float | None = None
 
     def _make_worker_state_template(self) -> dict:
         return {
@@ -703,6 +704,7 @@ class Engine:
 
         print(f'Starting with {self.num_observations} initial images...')
         if self.init_dir is not None:
+            os.makedirs(self.init_dir, exist_ok=True)
             src_dir = Path(self.init_dir)
         else:
             src_dir = WORKING_DIR
@@ -774,7 +776,9 @@ class Engine:
                 await self._finalize_slot(i, i, data, train_X[i].detach().cpu().numpy(), round_id, 0)
                 round_id += 1
 
-            Y = torch.tensor(yy).double().reshape(-1, 1)
+            # Build Y from a contiguous numpy array to avoid slow tensor-from-list path.
+            y_np = np.asarray(yy, dtype=np.float64).reshape(-1, 1)
+            Y = torch.from_numpy(y_np).double()
 
             return (train_X.detach().cpu().numpy(), Y.detach().cpu().numpy())
 
@@ -783,6 +787,8 @@ class Engine:
 
         print("Warming up GPU pool...")
         self._warmup_gpu_pool()
+
+        self.init_ready_timestamp = time.time()
 
         print("Engine started.")
         self.save_state(reason="start")
@@ -797,7 +803,6 @@ class Engine:
         round_id: int | None = None,
         limit: int | None = None,
     ) -> None:
-
         # Pick the user's chosen image (first entry of selection list)
         self.last_selected_basename = selection_basenames[0]
         img_name = Path(self.last_selected_basename).name
@@ -880,6 +885,10 @@ class Engine:
         new_I = [self.train_X.shape[0] +
                  i for i in range(self.pysps_num_candidates**2)]
         self.train_X = torch.cat([self.train_X, new_x], dim=0)
+        
+        # print(f'new_x: {new_x}')
+        # print(f'new_I: {new_I}')
+        # print(f'new self.train_X: {self.train_X}')
 
         # --- slider setup ---
         n = min(limit or self.num_observations_per_step + 1,
@@ -932,9 +941,11 @@ class Engine:
             self.last_round_context["new_y"] = [
                 float(val) for val in new_y_results]
 
-        feedback_values = new_y_results[1::]
-        self.Y = torch.cat([self.Y, torch.from_numpy(
-            np.array(feedback_values).reshape(-1, 1)).double().to(device)], dim=0)
+        # Keep label matrix aligned with train_X by appending scores for every newly
+        # generated point (one score per new_x entry).
+        feedback_tensor = torch.tensor(new_y_results, dtype=torch.double,
+                                       device=device).reshape(-1, 1)
+        self.Y = torch.cat([self.Y, feedback_tensor], dim=0)
 
         # Tell clients the round finished
         await self._events.put(("done", {
@@ -1318,6 +1329,8 @@ if __name__ == "__main__":
                         help="Path to config file override")
     parser.add_argument("--port", dest="port", type=int, default=8000,
                         help="Port to bind the server (default: 8000)")
+    parser.add_argument("--ssh", action="store_true",
+                        help="Enable SSH tunneling (not implemented)")
     args = parser.parse_args()
 
     if args.state_path:
@@ -1346,4 +1359,5 @@ if __name__ == "__main__":
         print(f"[cli] Using config override: {CONFIG_FILE}")
 
     _register_shutdown_handlers()
-    uvicorn.run("server_gallery:app", host="127.0.0.1", port=args.port, reload=False)
+    host = "127.0.0.1" if not args.ssh else "0.0.0.0"
+    uvicorn.run("server_gallery:app", host=host, port=args.port, reload=False)
