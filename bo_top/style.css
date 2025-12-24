@@ -267,23 +267,19 @@ body.no-scroll{
 .rank-labels{
   width: min(95vw, 1100px);
   display: flex;
-  justify-content: space-between;
-  margin: 0 auto 5px;
-  font-size: 0.9rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: #666;
+  justify-content: center;
+  margin: 0 auto 10px;
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #3a3a3a;
   padding: 0 12px;
+  text-transform: none;
 }
 
-.rank-label{
-  white-space: nowrap;
-}
-
-.rank-label-left{ color: #009E73; }
-.rank-label-right{ color: #D55E00; }
-.rank-label-mid{ color: #444; text-transform: none; letter-spacing: 0.05em; }
+.rank-direction{ white-space: nowrap; text-align: center; }
+.rank-direction .rank-word-left{ color: #009E73; }
+.rank-direction .rank-word-right{ color: #D55E00; }
 
 
 .reference-brick img,
@@ -324,7 +320,8 @@ body.no-scroll{
   flex-wrap: nowrap;
   gap: 12px;
   overflow-x: auto;
-  padding: 8px 12px;
+  overflow-y: visible;
+  padding: 36px 12px 8px;
   max-width: 100%;
   align-items: flex-start;
   flex: 1 1 auto;
@@ -347,6 +344,25 @@ body.no-scroll{
   cursor: grab;
   transition: transform .2s ease;
 }
+
+.extreme-pill{
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translate(-50%, -115%);
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: 1px solid rgba(0,0,0,0.07);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+  white-space: nowrap;
+}
+
+.extreme-pill.left{ background: #e8f6ed; color: #0c7d50; border-color: #c6e7d5; }
+.extreme-pill.right{ background: #fff2e7; color: #c24c00; border-color: #f3cfb1; }
 
 .brick.selected{}
 

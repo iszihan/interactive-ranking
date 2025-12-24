@@ -493,7 +493,8 @@ function setTopKValue(value) {
 
 function updateRankMidLabel() {
   if (!rankMidLabel) return;
-  rankMidLabel.textContent = topK && topK > 0 ? `Rank top ${topK}` : "Rank";
+  const mid = topK && topK > 0 ? `Rank top ${topK}` : "Rank";
+  rankMidLabel.innerHTML = `<span class="rank-word-left">Closest</span> ←─── ${mid} ───→ <span class="rank-word-right">Farthest</span>`;
 }
 
 function syncSelectedOrderToCandidates() {
@@ -616,6 +617,7 @@ function onMouseUp() {
     .map((img) => img.dataset?.src || img.src)
     .filter(Boolean);
   syncSelectionStyles();
+  refreshExtremePills();
 
   if (!wasDrag) {
     showZoomForBrick(droppedBrick);
@@ -661,6 +663,31 @@ function setTilesPerRow(N) {
   // choose a reasonable vw per tile so N tiles are visible-ish; clamp 8–18vw
   const basis = Math.max(8, Math.min(18, Math.floor(80 / Math.max(1, N))));
   document.documentElement.style.setProperty("--tile-ideal", `${basis}vw`);
+}
+
+function addExtremePills() {
+  if (!container) return;
+  const bricks = [...container.querySelectorAll(".brick")];
+  if (!bricks.length) return;
+
+  const addPill = (brick, label, side) => {
+    if (!brick) return;
+    const pill = document.createElement("div");
+    pill.className = `extreme-pill ${side}`;
+    pill.textContent = label;
+    brick.appendChild(pill);
+  };
+
+  addPill(bricks[0], "Most Similar", "left");
+  if (bricks.length > 1) {
+    addPill(bricks[bricks.length - 1], "Least Similar", "right");
+  }
+}
+
+function refreshExtremePills() {
+  if (!container) return;
+  container.querySelectorAll(".extreme-pill").forEach((pill) => pill.remove());
+  addExtremePills();
 }
 
 function renderGrid({ showLoading = false } = {}) {
@@ -748,6 +775,10 @@ function renderRankingFromSelection({ showLoading = false } = {}) {
 
     container.appendChild(brick);
     rendered += 1;
+  }
+
+  if (rendered > 0) {
+    refreshExtremePills();
   }
 
   if (rendered === 0) {
