@@ -1059,16 +1059,42 @@ class Engine:
 
             x_observations2 = self.x_observations[0]
             y_observations2 = self.x_observations[1]
-            for i in range(len(x_observations2)):
-                sample = torch.from_numpy(
-                    x_observations2[i]).double().to(device)
-                y = torch.from_numpy(y_observations2[i]).double().to(device)
+
+            samples = [torch.from_numpy(arr).double().to(device)
+                       for arr in x_observations2]
+            y_samples = [torch.from_numpy(val).double().to(device)
+                         for val in y_observations2]
+
+            # First, count which ones pass the distance gate.
+            accepted_indices: list[int] = []
+            for idx, sample in enumerate(samples):
                 if not any(torch.norm(sample - o) < dist_threshold for o in init_observations2):
-                    init_observations2.append(sample)
-                    init_y2.append(y)
-                else:
-                    print(
-                        f"Skipping observation {sample} as it is too close to existing ones.")
+                    accepted_indices.append(idx)
+
+            # Apply the accepted set.
+            for idx in accepted_indices:
+                init_observations2.append(samples[idx])
+                init_y2.append(y_samples[idx])
+
+            # If still short of the desired top_k, pick the farthest remaining samples.
+            target_k = int(getattr(self, "top_k", 0) or 0)
+            if target_k > 0 and len(init_observations2) < target_k:
+                remaining_indices = [i for i in range(len(samples)) if i not in accepted_indices]
+                # Greedy farthest-first selection against the current init_observations2.
+                while remaining_indices and len(init_observations2) < target_k:
+                    best_idx = None
+                    best_dist = -1.0
+                    for idx in remaining_indices:
+                        candidate = samples[idx]
+                        min_dist = min(torch.norm(candidate - o) for o in init_observations2)
+                        if float(min_dist) > best_dist:
+                            best_dist = float(min_dist)
+                            best_idx = idx
+                    if best_idx is None:
+                        break
+                    init_observations2.append(samples[best_idx])
+                    init_y2.append(y_samples[best_idx])
+                    remaining_indices = [i for i in remaining_indices if i != best_idx]
 
             init_observations2 = torch.stack(init_observations2).double()
 
