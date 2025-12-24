@@ -917,6 +917,11 @@ class Engine:
 
         print(
             f"Active dimensions: {active_dims}, Inactive dimensions: {inactive_dims}")
+        
+        # If no active dims, keep all
+        if len(active_dims) == 0:
+            active_dims = torch.arange(len(dim2loras))
+            inactive_dims = torch.arange(0)
 
         dim2loras = {d: loras for d, loras in dim2loras.items()
                      if d in active_dims.tolist()}
