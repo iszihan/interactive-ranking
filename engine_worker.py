@@ -39,15 +39,17 @@ def worker_make_generation(payload: Dict[str, Any]):
         control_img=control_img,
     )
 
+  is_init = bool(state.get("is_init", False))
+
   sim_val, image_path = obj_sim(
       state["gt_image_path"],
       copy.deepcopy(state["component_weights"]),
       w,
       weight_idx=state.get("weight_idx", 1),
       infer_image_func=infer_img_func,
-      output_dir=state["output_dir"],
-      to_vis=True,
-      is_init=False,
+        output_dir=state["output_dir"],
+        to_vis=True,
+        is_init=is_init,
       control_img=_get_control_img(state.get("control_img_path")),
   )
 
@@ -56,6 +58,7 @@ def worker_make_generation(payload: Dict[str, Any]):
       "data": data,
       "x": x.flatten().tolist(),
       "sim_val": float(np.asarray(sim_val).flatten()[0]),
+      "image_path": str(image_path),
   }
   if 'x_pysps' in payload:
     output['x_pysps'] = payload['x_pysps']

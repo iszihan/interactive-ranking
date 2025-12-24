@@ -14,7 +14,7 @@ from PIL import Image, ImageDraw
 from io import BytesIO
 from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, Response
 from fastapi import FastAPI, Body
 import torch
 import pytorch_lightning as pl
@@ -144,6 +144,16 @@ if _env_demo_participant:
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+
+class SafeStaticFiles(StaticFiles):
+    """StaticFiles that returns 404 instead of crashing when a file is missing."""
+
+    async def get_response(self, path: str, scope):  # type: ignore[override]
+        try:
+            return await super().get_response(path, scope)
+        except FileNotFoundError:
+            return Response(status_code=404)
+
 # helpers ------------------------------------------------------------
 
 
@@ -202,6 +212,16 @@ def _make_generation(engine, x: np.ndarray):
     # Read image and return bytes
     data = Path(image_path).read_bytes()
     return data, x, sim_val
+
+
+def _is_valid_image_bytes(data: bytes) -> bool:
+    try:
+        with Image.open(BytesIO(data)) as img:
+            img.verify()
+        return True
+    except Exception as exc:
+        print(f"[safety] Image bytes failed verification: {exc}")
+        return False
 
 
 def ranking2pairs(ranked_indices):
@@ -504,12 +524,19 @@ class Engine:
             print(f"Failed to load engine state from {target}: {exc}")
             return False
 
-    def _build_worker_payload(self, x_vector: np.ndarray) -> dict:
+    def _build_worker_payload(self, x_vector: np.ndarray, *, output_dir: str | None = None,
+                               is_init: bool = False) -> dict:
         state = copy.deepcopy(self.worker_state_template or {})
+        if output_dir:
+            state["output_dir"] = output_dir
+        if is_init:
+            state["is_init"] = True
+
+        vector_flat = np.asarray(x_vector).reshape(-1)
         return {
             "state": state,
-            "x": x_vector.tolist(),
-            "w": x_vector.tolist(),
+            "x": vector_flat.tolist(),
+            "w": vector_flat.tolist(),
         }
 
     def _warmup_gpu_pool(self) -> None:
@@ -584,7 +611,15 @@ class Engine:
             if isinstance(data, memoryview):
                 data = data.tobytes()
             x_vec = np.array(result["x"], dtype=np.float64)
-            new_y[slot_idx] = float(result["sim_val"])
+            if not _is_valid_image_bytes(data):
+                print(f"[safety] Invalid image bytes for slot {slot_idx}; regenerating once in-process")
+                data, x_vec_regen, y_regen = await asyncio.to_thread(_make_generation, self, x_vec)
+                if not _is_valid_image_bytes(data):
+                    raise RuntimeError(f"Regenerated image still invalid for slot {slot_idx}")
+                x_vec = np.array(x_vec_regen, dtype=np.float64)
+                new_y[slot_idx] = float(np.asarray(y_regen).flatten()[0])
+            else:
+                new_y[slot_idx] = float(result.get("sim_val", new_y[slot_idx]))
             await self._finalize_slot(slot_idx, idx, data, x_vec, round_id, iteration)
 
     async def _generate_in_process(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int):
@@ -594,6 +629,13 @@ class Engine:
                 x_trial = x_trial.detach().cpu().numpy()
             idx = new_I[i]
             data, x_vec, y = await asyncio.to_thread(_make_generation, self, x_trial)
+            if not _is_valid_image_bytes(data):
+                print(f"[safety] Invalid image bytes for slot {i}; regenerating once")
+                data, x_vec_regen, y_regen = await asyncio.to_thread(_make_generation, self, x_trial)
+                if not _is_valid_image_bytes(data):
+                    raise RuntimeError(f"Regenerated image still invalid for slot {i}")
+                x_vec = x_vec_regen
+                y = y_regen
             new_y[i] = float(np.asarray(y).flatten()[0])
             await self._finalize_slot(i, idx, data, x_vec, round_id, iteration)
 
@@ -725,8 +767,23 @@ class Engine:
         if not os.path.exists(src_dir / 'preinit'):
             os.makedirs(src_dir / 'preinit', exist_ok=True)
 
-        init_observations, x_record = prepare_init_obs_simplex(self.num_observations, len(
-            self.component_weights), self.f_preinit, seed=self.seed, sparse_threshold=None, sampler=sample_dirichlet_simplex)
+        def _build_init_payload(x_np, _idx):
+            return self._build_worker_payload(
+                x_np,
+                output_dir=str(src_dir / 'preinit'),
+                is_init=True,
+            )
+
+        init_observations, x_record = prepare_init_obs_simplex(
+            self.num_observations,
+            len(self.component_weights),
+            self.f_preinit,
+            seed=self.seed,
+            sparse_threshold=None,
+            sampler=sample_dirichlet_simplex,
+            gpu_pool=self.gpu_pool,
+            payload_builder=_build_init_payload,
+        )
 
         x_observations_score = init_observations[1]
         best_x = init_observations[0][np.argmax(x_observations_score)]
@@ -767,15 +824,41 @@ class Engine:
 
         async def prepare_init_pysps_plane(train_X, f):
             """Prepare initial observations for the optimization."""
-            yy = []
-            round_id = 0
-            for i in range(train_X.shape[0]):
-                sim_val, image_path = f(
-                    train_X[i].reshape(1, -1).detach().cpu().numpy())
-                yy.append(sim_val)
-                data = Path(image_path).read_bytes()
-                await self._finalize_slot(i, i, data, train_X[i].detach().cpu().numpy(), round_id, 0)
-                round_id += 1
+            yy: list[float] = [0.0] * train_X.shape[0]
+
+            if self.gpu_pool:
+                payloads = []
+                for i in range(train_X.shape[0]):
+                    x_np = train_X[i].reshape(1, -1).detach().cpu().numpy()
+                    payloads.append({
+                        "payload": self._build_worker_payload(
+                            x_np,
+                            output_dir=str(src_dir),
+                            is_init=True,
+                        )
+                    })
+
+                results = await asyncio.to_thread(
+                    self.gpu_pool.map, "worker_make_generation", payloads
+                )
+
+                for i, res in enumerate(results):
+                    data = res["data"]
+                    if isinstance(data, memoryview):
+                        data = data.tobytes()
+                    sim_val = float(res["sim_val"])
+                    yy[i] = sim_val
+                    x_vec = np.array(res["x"], dtype=np.float64)
+                    await self._finalize_slot(i, i, data, x_vec, i, 0)
+            else:
+                round_id = 0
+                for i in range(train_X.shape[0]):
+                    sim_val, image_path = f(
+                        train_X[i].reshape(1, -1).detach().cpu().numpy())
+                    yy[i] = sim_val
+                    data = Path(image_path).read_bytes()
+                    await self._finalize_slot(i, i, data, train_X[i].detach().cpu().numpy(), round_id, 0)
+                    round_id += 1
 
             # Build Y from a contiguous numpy array to avoid slow tensor-from-list path.
             y_np = np.asarray(yy, dtype=np.float64).reshape(-1, 1)
@@ -969,7 +1052,7 @@ def _require_engine() -> Engine:
 
 app.mount("/static", StaticFiles(directory="gallery"), name="static")
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
-app.mount("/slots", StaticFiles(directory=str(SLOTS_DIR)), name="slots")
+app.mount("/slots", SafeStaticFiles(directory=str(SLOTS_DIR)), name="slots")
 app.mount("/description", StaticFiles(directory=str(DESCRIPTION_DIR)),
           name="description")
 app.mount("/tutorial", StaticFiles(directory=str(TUTORIAL_DIR)), name="tutorial")
@@ -1164,7 +1247,7 @@ async def start() -> JSONResponse:
     iteration = int(getattr(eng, "step", 0))
 
     MIN_COUNT = 1          # how many images make a “batch”
-    WAIT_TIMEOUT = 120.0
+    WAIT_TIMEOUT = 600.0
     deadline = time.monotonic() + WAIT_TIMEOUT
     while time.monotonic() < deadline:
         images = _list_image_urls()

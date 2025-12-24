@@ -1,7 +1,6 @@
 # server_bo.py
 from serialize import export_engine_state, apply_engine_state, save_engine_state, load_engine_state
 from async_multi_gpu_pool import MultiGPUInferPool
-from helper.sampler import qmc_simplex_generator, get_mcmc_from_cache
 from search_benchmark.acq_prior import (
     qSimplexUpperConfidenceBound,
     stick_breaking_transform, inverse_stick_breaking_transform
@@ -19,7 +18,6 @@ from search_benchmark.comparison_solvers import fit_gpytorch_pair_model, pairwis
 from search_benchmark.multi_solvers import break_clusters_even
 from search_benchmark.util import sample_shuffled_unshuffled
 from helper.build_clusters import build_cluster_hierarchy, find_images_for_folders, build_tree
-from helper.sampler import sample_dirichlet_simplex
 from helper.infer import infer
 import argparse
 import signal
@@ -43,7 +41,7 @@ import multiprocessing
 import pytorch_lightning as pl
 import torch
 from fastapi import FastAPI, Body
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from io import BytesIO
@@ -160,6 +158,29 @@ if _env_demo_participant:
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+
+class SafeStaticFiles(StaticFiles):
+    """StaticFiles that returns 404 instead of crashing when a file is missing."""
+
+    async def get_response(self, path: str, scope):  # type: ignore[override]
+        try:
+            return await super().get_response(path, scope)
+        except FileNotFoundError:
+            return Response(status_code=404)
+
+
+def _lazy_samplers(use_cached=True):
+    # Deferred import to avoid heavy init when unused (e.g., CLI help, health checks).
+    if use_cached:
+        from helper import sampler as _sampler
+    else:
+        from helper import sampler_nocache as _sampler
+    return (
+        _sampler.qmc_simplex_generator,
+        _sampler.get_mcmc_from_cache,
+        _sampler.sample_dirichlet_simplex,
+    )
+
 # helpers ------------------------------------------------------------
 
 
@@ -199,6 +220,16 @@ def _make_generation(engine, x: np.ndarray):
     # Read image and return bytes
     data = Path(image_path).read_bytes()
     return data, x, sim_val
+
+
+def _is_valid_image_bytes(data: bytes) -> bool:
+    try:
+        with Image.open(BytesIO(data)) as img:
+            img.verify()
+        return True
+    except Exception as exc:
+        print(f"[safety] Image bytes failed verification: {exc}")
+        return False
 
 
 def ranking2pairs(ranked_indices):
@@ -283,6 +314,9 @@ class Engine:
         self.infer_steps = config.get('infer_steps', 30)
         self.num_observations_per_step = config.get(
             'num_observations_per_step', 5)
+        
+        self.mcmc_cache_enabled = bool(config.get('mcmc_cache_enabled', True))
+        print("Engine MCMC cache enabled:", self.mcmc_cache_enabled)
 
         # Stage iterations
         raw_stage_iterations = config.get('stage_iterations', [])
@@ -587,19 +621,25 @@ class Engine:
             print(f"Failed to load engine state from {target}: {exc}")
             return False
 
-    def _build_worker_payload(self, x_vector: np.ndarray) -> dict:
+    def _build_worker_payload(self, x_vector: np.ndarray, *, output_dir: str | None = None,
+                               is_init: bool = False) -> dict:
         lora_dim = len(self.component_weights)
         w_full = np.zeros(lora_dim)
         # Scale each LoRA by its parent dimension's scalar weight
-        w_vec = x_vector.reshape(-1)
+        w_vec = np.asarray(x_vector).reshape(-1)
         scale = w_vec[np.asarray(self.dim_index_per_lora, dtype=int)]
         w_full[self.lora_merge_indices] = np.asarray(
             self.lora_merge_weights) * scale
 
         state = copy.deepcopy(self.worker_state_template or {})
+        if output_dir:
+            state["output_dir"] = output_dir
+        if is_init:
+            state["is_init"] = True
+
         return {
             "state": state,
-            "x": x_vector.tolist(),
+            "x": w_vec.tolist(),
             "w": w_full.tolist(),
         }
 
@@ -676,7 +716,15 @@ class Engine:
             if isinstance(data, memoryview):
                 data = data.tobytes()
             x_vec = np.array(result["x"], dtype=np.float64)
-            new_y[slot_idx] = float(result["sim_val"])
+            if not _is_valid_image_bytes(data):
+                print(f"[safety] Invalid image bytes for slot {slot_idx}; regenerating once in-process")
+                data, x_vec_regen, y_regen = await asyncio.to_thread(_make_generation, self, x_vec)
+                if not _is_valid_image_bytes(data):
+                    raise RuntimeError(f"Regenerated image still invalid for slot {slot_idx}")
+                x_vec = np.array(x_vec_regen, dtype=np.float64)
+                new_y[slot_idx] = float(np.asarray(y_regen).flatten()[0])
+            else:
+                new_y[slot_idx] = float(result.get("sim_val", new_y[slot_idx]))
             await self._finalize_slot(slot_idx, idx, data, x_vec, round_id, iteration, emit_events=emit_events)
 
     async def _generate_in_process(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int, *, emit_events: bool = True):
@@ -686,6 +734,13 @@ class Engine:
                 x_trial = x_trial.detach().cpu().numpy()
             idx = new_I[i]
             data, x_vec, y = await asyncio.to_thread(_make_generation, self, x_trial)
+            if not _is_valid_image_bytes(data):
+                print(f"[safety] Invalid image bytes for slot {i}; regenerating once")
+                data, x_vec_regen, y_regen = await asyncio.to_thread(_make_generation, self, x_trial)
+                if not _is_valid_image_bytes(data):
+                    raise RuntimeError(f"Regenerated image still invalid for slot {i}")
+                x_vec = x_vec_regen
+                y = y_regen
             new_y[i] = float(np.asarray(y).flatten()[0])
             await self._finalize_slot(i, idx, data, x_vec, round_id, iteration, emit_events=emit_events)
 
@@ -782,7 +837,8 @@ class Engine:
             restored = self.load_state()
 
         # Initialize mcmc cache regardless of restore state
-        get_mcmc_from_cache()
+        _, lazy_get_mcmc, _ = _lazy_samplers(self.mcmc_cache_enabled)
+        lazy_get_mcmc()
 
         self.clear_outputs()
 
@@ -818,6 +874,15 @@ class Engine:
         os.makedirs(self.init_dir, exist_ok=True)
 
         self.construct_init_samples()
+        
+        if src_dir.exists():
+            for p in sorted(src_dir.glob("init*.png")):
+                try:
+                    shutil.copy2(p, OUTPUT_DIR / p.name)
+                except Exception:
+                    pass
+        self.init_dir = src_dir
+        os.makedirs(self.init_dir, exist_ok=True)
 
         print("Warming up GPU pool...")
         self._warmup_gpu_pool()
@@ -949,8 +1014,28 @@ class Engine:
     def construct_init_samples(self, *, capture_context: bool = False,
                                context_iteration: int | None = None):
         inf_f = self.f_init if self.train_X is None else self.f
-        self.x_observations, x_record = prepare_init_obs_simplex(self.num_observations, len(
-            self.dim2loras), inf_f, seed=self.seed, sparse_threshold=0.1, sampler=sample_dirichlet_simplex)
+        is_init_run = self.train_X is None
+
+        def _build_init_payload(x_np, _idx):
+            target_dir = str(self.init_dir) if is_init_run else str(OUTPUT_DIR)
+            return self._build_worker_payload(
+                x_np,
+                output_dir=target_dir,
+                is_init=is_init_run,
+            )
+
+        _, _, lazy_dirichlet = _lazy_samplers(self.mcmc_cache_enabled)
+
+        self.x_observations, x_record = prepare_init_obs_simplex(
+            self.num_observations,
+            len(self.dim2loras),
+            inf_f,
+            seed=self.seed,
+            sparse_threshold=0.1,
+            sampler=lazy_dirichlet,
+            gpu_pool=self.gpu_pool,
+            payload_builder=_build_init_payload,
+        )
         seed_context: dict | None = None
         context_iteration_value = context_iteration if context_iteration is not None else int(
             self.step)
@@ -1190,7 +1275,8 @@ class Engine:
         # )
 
         def generator(n, q, seed):
-            return qmc_simplex_generator(n, q, self.train_X.shape[1], seed)
+            lazy_qmc, _, _ = _lazy_samplers(self.mcmc_cache_enabled)
+            return lazy_qmc(n, q, self.train_X.shape[1], seed)
         Xinit_coeff = gen_batch_initial_conditions(
             acq_function=acq_function,
             bounds=coeff_bounds,
@@ -1361,7 +1447,7 @@ class Engine:
 
         pairwise_gp = fit_gpytorch_pair_model(self.train_X, self.comp_pairs)
         gp, latent_Y = pairwise_to_single_task(
-            self.train_X, self.Y, pairwise_gp)
+            self.train_X, self.Y, pairwise_gp, use_cached=self.mcmc_cache_enabled)
 
         print(f'self.train_X: {self.train_X}')
         print(f'self.comp_pairs: {self.comp_pairs}')
@@ -1500,7 +1586,7 @@ app.mount("/description", StaticFiles(directory=str(DESCRIPTION_DIR)),
           name="description")
 app.mount("/tutorial", StaticFiles(directory=str(TUTORIAL_DIR)), name="tutorial")
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
-app.mount("/slots", StaticFiles(directory=str(SLOTS_DIR)), name="slots")
+app.mount("/slots", SafeStaticFiles(directory=str(SLOTS_DIR)), name="slots")
 
 
 @app.get("/")
@@ -1682,7 +1768,7 @@ def start() -> JSONResponse:
     ranking_prompt = _ranking_prompt(getattr(eng, "top_k", None))
 
     MIN_COUNT = 1          # how many images make a “batch”
-    WAIT_TIMEOUT = 120.0
+    WAIT_TIMEOUT = 600.0
     deadline = time.monotonic() + WAIT_TIMEOUT
     while time.monotonic() < deadline:
         images = _list_image_urls()

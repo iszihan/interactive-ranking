@@ -587,19 +587,25 @@ class Engine:
             print(f"Failed to load engine state from {target}: {exc}")
             return False
 
-    def _build_worker_payload(self, x_vector: np.ndarray) -> dict:
+    def _build_worker_payload(self, x_vector: np.ndarray, *, output_dir: str | None = None,
+                               is_init: bool = False) -> dict:
         lora_dim = len(self.component_weights)
         w_full = np.zeros(lora_dim)
         # Scale each LoRA by its parent dimension's scalar weight
-        w_vec = x_vector.reshape(-1)
+        w_vec = np.asarray(x_vector).reshape(-1)
         scale = w_vec[np.asarray(self.dim_index_per_lora, dtype=int)]
         w_full[self.lora_merge_indices] = np.asarray(
             self.lora_merge_weights) * scale
 
         state = copy.deepcopy(self.worker_state_template or {})
+        if output_dir:
+            state["output_dir"] = output_dir
+        if is_init:
+            state["is_init"] = True
+
         return {
             "state": state,
-            "x": x_vector.tolist(),
+            "x": w_vec.tolist(),
             "w": w_full.tolist(),
         }
 
@@ -941,8 +947,26 @@ class Engine:
     def construct_init_samples(self, *, capture_context: bool = False,
                                context_iteration: int | None = None):
         inf_f = self.f_init if self.train_X is None else self.f
-        self.x_observations, x_record = prepare_init_obs_simplex(self.num_observations, len(
-            self.dim2loras), inf_f, seed=self.seed, sparse_threshold=0.1, sampler=sample_dirichlet_simplex)
+        is_init_run = self.train_X is None
+
+        def _build_init_payload(x_np, _idx):
+            target_dir = str(self.init_dir) if is_init_run else str(OUTPUT_DIR)
+            return self._build_worker_payload(
+                x_np,
+                output_dir=target_dir,
+                is_init=is_init_run,
+            )
+
+        self.x_observations, x_record = prepare_init_obs_simplex(
+            self.num_observations,
+            len(self.dim2loras),
+            inf_f,
+            seed=self.seed,
+            sparse_threshold=0.1,
+            sampler=sample_dirichlet_simplex,
+            gpu_pool=self.gpu_pool,
+            payload_builder=_build_init_payload,
+        )
         seed_context: dict | None = None
         context_iteration_value = context_iteration if context_iteration is not None else int(
             self.step)
