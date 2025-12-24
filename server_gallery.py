@@ -211,7 +211,7 @@ def _make_generation(engine, x: np.ndarray):
     sim_val, image_path = engine.f(x)
     # Read image and return bytes
     data = Path(image_path).read_bytes()
-    return data, x, sim_val
+    return data, x, sim_val, str(image_path)
 
 
 def _is_valid_image_bytes(data: bytes) -> bool:
@@ -466,7 +466,8 @@ class Engine:
             "infer_steps": self.infer_steps,
             "infer_width": self.infer_width,
             "infer_height": self.infer_height,
-            "output_dir": str(self.outputs_dir),
+            # "output_dir": str(self.outputs_dir),
+            "output_dir": str(WORKING_DIR),
             "control_img_path": self.control_img_path,
             "weight_idx": 1,
         }
@@ -580,7 +581,7 @@ class Engine:
 
         self._pool_warmed = True
 
-    async def _finalize_slot(self, slot_idx: int, idx: int, data: bytes, x_vector: np.ndarray, round_id: int, iteration: int):
+    async def _finalize_slot(self, slot_idx: int, idx: int, data: bytes, x_vector: np.ndarray, round_id: int, iteration: int, *, image_path: str | None = None):
         out_path = SLOTS_DIR / f"slot-{slot_idx}.png"
         await asyncio.to_thread(out_path.write_bytes, data)
         await self._events.put(("slot", {
@@ -589,8 +590,10 @@ class Engine:
             "iteration": int(iteration),
         }))
         self.x_record[out_path.name] = (x_vector, int(idx))
+        if image_path:
+            self.x_record[out_path.name] = (x_vector, int(idx), str(image_path))
 
-    async def _generate_with_pool(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int):
+    async def _generate_with_pool(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int, *, basenames_out: list[str] | None = None):
         pending: dict[int, tuple[int, int]] = {}
         for i in range(new_x.shape[0]):
             x_trial = new_x[i]
@@ -611,33 +614,50 @@ class Engine:
             if isinstance(data, memoryview):
                 data = data.tobytes()
             x_vec = np.array(result["x"], dtype=np.float64)
+            image_path = result.get("image_path") if isinstance(result, dict) else None
             if not _is_valid_image_bytes(data):
                 print(f"[safety] Invalid image bytes for slot {slot_idx}; regenerating once in-process")
-                data, x_vec_regen, y_regen = await asyncio.to_thread(_make_generation, self, x_vec)
+                data, x_vec_regen, y_regen, image_path_regen = await asyncio.to_thread(_make_generation, self, x_vec)
                 if not _is_valid_image_bytes(data):
                     raise RuntimeError(f"Regenerated image still invalid for slot {slot_idx}")
                 x_vec = np.array(x_vec_regen, dtype=np.float64)
                 new_y[slot_idx] = float(np.asarray(y_regen).flatten()[0])
+                image_path = image_path or image_path_regen
             else:
                 new_y[slot_idx] = float(result.get("sim_val", new_y[slot_idx]))
-            await self._finalize_slot(slot_idx, idx, data, x_vec, round_id, iteration)
+            img_name = None
+            if image_path:
+                try:
+                    img_name = Path(image_path).name
+                except Exception:
+                    img_name = None
+            if basenames_out is not None:
+                basenames_out.append(img_name or f"slot-{slot_idx}.png")
+            await self._finalize_slot(slot_idx, idx, data, x_vec, round_id, iteration, image_path=image_path)
 
-    async def _generate_in_process(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int):
+    async def _generate_in_process(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int, *, basenames_out: list[str] | None = None):
         for i in range(new_x.shape[0]):
             x_trial = new_x[i]
             if isinstance(x_trial, torch.Tensor):
                 x_trial = x_trial.detach().cpu().numpy()
             idx = new_I[i]
-            data, x_vec, y = await asyncio.to_thread(_make_generation, self, x_trial)
+            data, x_vec, y, image_path = await asyncio.to_thread(_make_generation, self, x_trial)
             if not _is_valid_image_bytes(data):
                 print(f"[safety] Invalid image bytes for slot {i}; regenerating once")
-                data, x_vec_regen, y_regen = await asyncio.to_thread(_make_generation, self, x_trial)
+                data, x_vec_regen, y_regen, image_path_regen = await asyncio.to_thread(_make_generation, self, x_trial)
                 if not _is_valid_image_bytes(data):
                     raise RuntimeError(f"Regenerated image still invalid for slot {i}")
                 x_vec = x_vec_regen
                 y = y_regen
+                image_path = image_path_regen
             new_y[i] = float(np.asarray(y).flatten()[0])
-            await self._finalize_slot(i, idx, data, x_vec, round_id, iteration)
+            if basenames_out is not None:
+                try:
+                    img_name = Path(image_path).name if image_path else f"slot-{i}.png"
+                except Exception:
+                    img_name = f"slot-{i}.png"
+                basenames_out.append(img_name)
+            await self._finalize_slot(i, idx, data, x_vec, round_id, iteration, image_path=image_path)
 
     async def recall_last_round(self, *, emit_events: bool = False) -> bool:
         ctx = self.last_round_context or {}
@@ -1016,10 +1036,11 @@ class Engine:
 
         # Iterate and generate each slot given new_x
         new_y = [0 for _ in range(new_x.shape[0])]
+        result_basenames: list[str] = []
         if self.gpu_pool:
-            await self._generate_with_pool(new_x, new_I, new_y, round_id, iteration)
+            await self._generate_with_pool(new_x, new_I, new_y, round_id, iteration, basenames_out=result_basenames)
         else:
-            await self._generate_in_process(new_x, new_I, new_y, round_id, iteration)
+            await self._generate_in_process(new_x, new_I, new_y, round_id, iteration, basenames_out=result_basenames)
         new_y_results = list(new_y)
         if self.last_round_context is not None:
             self.last_round_context["new_y"] = [
@@ -1030,6 +1051,15 @@ class Engine:
         feedback_tensor = torch.tensor(new_y_results, dtype=torch.double,
                                        device=device).reshape(-1, 1)
         self.Y = torch.cat([self.Y, feedback_tensor], dim=0)
+
+        # Debug snapshot: per-step scores and generated image basenames (from WORKING_DIR).
+        if self.ranking_history:
+            try:
+                self.ranking_history[-1]["new_y"] = [float(v) for v in new_y_results]
+                if result_basenames:
+                    self.ranking_history[-1]["result_images"] = result_basenames
+            except Exception as exc:  # pragma: no cover (debug only)
+                print(f"[state] Failed to capture per-step debug info: {exc}")
 
         # Tell clients the round finished
         await self._events.put(("done", {

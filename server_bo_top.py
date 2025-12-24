@@ -219,7 +219,7 @@ def _make_generation(engine, x: np.ndarray):
     sim_val, image_path = engine.f(x)
     # Read image and return bytes
     data = Path(image_path).read_bytes()
-    return data, x, sim_val
+    return data, x, sim_val, image_path
 
 
 def _is_valid_image_bytes(data: bytes) -> bool:
@@ -563,7 +563,8 @@ class Engine:
             "infer_steps": self.infer_steps,
             "infer_width": self.infer_width,
             "infer_height": self.infer_height,
-            "output_dir": str(self.outputs_dir),
+            # "output_dir": str(self.outputs_dir),
+            "output_dir": str(WORKING_DIR),
             "control_img_path": self.control_img_path,
             "weight_idx": 1,
         }
@@ -695,8 +696,10 @@ class Engine:
             }))
         self.x_record[out_path.name] = (x_vector, int(idx))
 
-    async def _generate_with_pool(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int, *, emit_events: bool = True):
+    async def _generate_with_pool(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int, result_images: list[str] | None = None, *, emit_events: bool = True):
         pending: dict[int, tuple[int, int]] = {}
+        if result_images is None:
+            result_images = [None for _ in range(new_x.shape[0])]
         for i in range(new_x.shape[0]):
             x_trial = new_x[i]
             if isinstance(x_trial, torch.Tensor):
@@ -716,32 +719,41 @@ class Engine:
             if isinstance(data, memoryview):
                 data = data.tobytes()
             x_vec = np.array(result["x"], dtype=np.float64)
+            image_path = result.get("image_path")
             if not _is_valid_image_bytes(data):
                 print(f"[safety] Invalid image bytes for slot {slot_idx}; regenerating once in-process")
-                data, x_vec_regen, y_regen = await asyncio.to_thread(_make_generation, self, x_vec)
+                data, x_vec_regen, y_regen, image_path_regen = await asyncio.to_thread(_make_generation, self, x_vec)
                 if not _is_valid_image_bytes(data):
                     raise RuntimeError(f"Regenerated image still invalid for slot {slot_idx}")
                 x_vec = np.array(x_vec_regen, dtype=np.float64)
                 new_y[slot_idx] = float(np.asarray(y_regen).flatten()[0])
+                image_path = image_path_regen
             else:
                 new_y[slot_idx] = float(result.get("sim_val", new_y[slot_idx]))
+            if image_path:
+                result_images[slot_idx] = Path(image_path).name
             await self._finalize_slot(slot_idx, idx, data, x_vec, round_id, iteration, emit_events=emit_events)
 
-    async def _generate_in_process(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int, *, emit_events: bool = True):
+    async def _generate_in_process(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int, result_images: list[str] | None = None, *, emit_events: bool = True):
+        if result_images is None:
+            result_images = [None for _ in range(new_x.shape[0])]
         for i in range(new_x.shape[0]):
             x_trial = new_x[i]
             if isinstance(x_trial, torch.Tensor):
                 x_trial = x_trial.detach().cpu().numpy()
             idx = new_I[i]
-            data, x_vec, y = await asyncio.to_thread(_make_generation, self, x_trial)
+            data, x_vec, y, image_path = await asyncio.to_thread(_make_generation, self, x_trial)
             if not _is_valid_image_bytes(data):
                 print(f"[safety] Invalid image bytes for slot {i}; regenerating once")
-                data, x_vec_regen, y_regen = await asyncio.to_thread(_make_generation, self, x_trial)
+                data, x_vec_regen, y_regen, image_path_regen = await asyncio.to_thread(_make_generation, self, x_trial)
                 if not _is_valid_image_bytes(data):
                     raise RuntimeError(f"Regenerated image still invalid for slot {i}")
                 x_vec = x_vec_regen
                 y = y_regen
+                image_path = image_path_regen
             new_y[i] = float(np.asarray(y).flatten()[0])
+            if image_path:
+                result_images[i] = Path(image_path).name
             await self._finalize_slot(i, idx, data, x_vec, round_id, iteration, emit_events=emit_events)
 
     async def recall_last_round(self, *, emit_events: bool = False) -> bool:
@@ -778,6 +790,12 @@ class Engine:
         else:
             new_y = [0.0 for _ in range(new_x_tensor.shape[0])]
 
+        regen_images = ctx.get("result_images")
+        if isinstance(regen_images, list) and len(regen_images) == new_x_tensor.shape[0]:
+            result_images = [str(v) if v is not None else None for v in regen_images]
+        else:
+            result_images = [None for _ in range(new_x_tensor.shape[0])]
+
         if emit_events:
             await self._events.put(("begin", {
                 "round": round_id,
@@ -786,15 +804,16 @@ class Engine:
             }))
 
         if self.gpu_pool:
-            await self._generate_with_pool(new_x_tensor, new_I_list, new_y, round_id, iteration)
+            await self._generate_with_pool(new_x_tensor, new_I_list, new_y, round_id, iteration, result_images)
         else:
-            await self._generate_in_process(new_x_tensor, new_I_list, new_y, round_id, iteration)
+            await self._generate_in_process(new_x_tensor, new_I_list, new_y, round_id, iteration, result_images)
 
         if emit_events:
             await self._events.put(("done", {"round": round_id, "iteration": iteration}))
 
         if self.last_round_context is not None:
             self.last_round_context["new_y"] = [float(val) for val in new_y]
+            self.last_round_context["result_images"] = list(result_images)
 
         return True
 
@@ -1530,7 +1549,7 @@ class Engine:
             round_id = int(asyncio.get_running_loop().time() * 1000)
         iteration = int(self.step) + 1
 
-        self.ranking_history.append({
+        ranking_entry = {
             "step": int(self.step),
             "round": int(round_id),
             "ranking": list(ranking_basenames),
@@ -1539,7 +1558,7 @@ class Engine:
             "selected": self.last_selected_basename,
             "saved_at": time.time(),
             "train_version": int(self.train_dataset_version),
-        })
+        }
 
         ctx_new_x = new_x.detach().cpu().tolist()
         self.last_round_context = {
@@ -1570,14 +1589,20 @@ class Engine:
 
         # Iterate and generate each slot given new_x
         new_y = [0 for _ in range(new_x.shape[0])]
+        result_basenames: list[str | None] = [None for _ in range(new_x.shape[0])]
         if self.gpu_pool:
-            await self._generate_with_pool(new_x, new_I, new_y, round_id, iteration)
+            await self._generate_with_pool(new_x, new_I, new_y, round_id, iteration, result_basenames)
         else:
-            await self._generate_in_process(new_x, new_I, new_y, round_id, iteration)
+            await self._generate_in_process(new_x, new_I, new_y, round_id, iteration, result_basenames)
         new_y_results = list(new_y)
         if self.last_round_context is not None:
             self.last_round_context["new_y"] = [
                 float(val) for val in new_y_results]
+            self.last_round_context["result_images"] = list(result_basenames)
+
+        ranking_entry["new_y"] = [float(val) for val in new_y_results]
+        ranking_entry["result_images"] = [str(b) if b is not None else None for b in result_basenames]
+        self.ranking_history.append(ranking_entry)
 
         self.Y = torch.cat([self.Y, torch.zeros(
             (new_batch_size, 1), dtype=torch.double).to(device)], dim=0)  # for selected

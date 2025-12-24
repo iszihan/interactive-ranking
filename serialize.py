@@ -30,21 +30,41 @@ def _tensor_to_list(value: Any) -> Any:
 def _dict_to_serializable(record: Dict[str, Any]) -> Dict[str, Any]:
     serialized: Dict[str, Any] = {}
     for key, value in (record or {}).items():
-        vec, idx = value
-        serialized[key] = {
+        vec = None
+        idx = None
+        image_path = None
+        if isinstance(value, (list, tuple)):
+            if len(value) >= 2:
+                vec, idx = value[0], value[1]
+            if len(value) >= 3:
+                image_path = value[2]
+        elif isinstance(value, dict):
+            vec = value.get("vector")
+            idx = value.get("index")
+            image_path = value.get("image_path")
+        if vec is None or idx is None:
+            # Skip malformed entries rather than raising during save.
+            continue
+        entry = {
             "vector": _tensor_to_list(vec),
             "index": idx,
         }
+        if image_path is not None:
+            entry["image_path"] = str(image_path)
+        serialized[key] = entry
     return serialized
 
 
 def _dict_from_serialized(data: Dict[str, Any]) -> Dict[str, Any]:
     restored: Dict[str, Any] = {}
     for key, value in (data or {}).items():
-        restored[key] = (
-            np.asarray(value.get("vector", []), dtype=np.float64),
-            int(value.get("index", -1))
-        )
+        vector = np.asarray(value.get("vector", []), dtype=np.float64)
+        index = int(value.get("index", -1))
+        image_path = value.get("image_path")
+        if image_path is None:
+            restored[key] = (vector, index)
+        else:
+            restored[key] = (vector, index, image_path)
     return restored
 
 
@@ -73,6 +93,12 @@ def export_engine_state(engine: "Engine") -> Dict[str, Any]:
             train_version_value = int(train_version_value)
         except (TypeError, ValueError):
             train_version_value = 0
+        new_y_snapshot = item.get("new_y")
+        if isinstance(new_y_snapshot, torch.Tensor):
+            new_y_snapshot = _tensor_to_list(new_y_snapshot)
+        result_images_snapshot = item.get("result_images")
+        if isinstance(result_images_snapshot, (list, tuple)):
+            result_images_snapshot = [str(x) for x in result_images_snapshot]
         history_payload.append({
             "step": int(item.get("step", 0)),
             "round": int(item.get("round", 0)),
@@ -81,6 +107,8 @@ def export_engine_state(engine: "Engine") -> Dict[str, Any]:
             "selected": item.get("selected"),
             "saved_at": item.get("saved_at"),
             "train_version": train_version_value,
+            "new_y": new_y_snapshot,
+            "result_images": result_images_snapshot,
         })
 
     train_history_payload: list[Dict[str, Any]] = []
