@@ -19,6 +19,7 @@ const descriptionClose = document.getElementById("descriptionClose");
 const tutorialToggle = document.getElementById("tutorialToggle");
 const tutorialOverlay = document.getElementById("tutorialOverlay");
 const tutorialClose = document.getElementById("tutorialClose");
+const refreshUiBtn = document.getElementById("refreshUiBtn");
 const demoOverlay = document.getElementById("demoOverlay");
 const demoClose = document.getElementById("demoClose");
 const demoForm = document.getElementById("demoForm");
@@ -833,6 +834,33 @@ if (startBtn) {
   startBtn.addEventListener("click", handleStartClick);
 }
 
+async function refreshSliderStatus() {
+  try {
+    const resp = await fetch("/api/slider/status");
+    if (!resp.ok) return;
+    const data = await resp.json();
+
+    const iter = Number(data.iteration ?? data.step);
+    setIterationDisplay(Number.isFinite(iter) ? iter : null);
+    updateReferenceImage(data.gt_image);
+    buildSliderInterface(data.slider || {});
+    updatePreviewImage(data.latest_image || null);
+    hydrateHistoryFromPayload(data.history);
+
+    if (historyEntries.length) {
+      sliderState = historyEntries[0].x.slice();
+      updateSliderInputsFromState();
+      if (!data.latest_image) {
+        updatePreviewImage(historyEntries[0].image || null);
+      }
+    }
+
+    refreshSafetyFromServer();
+  } catch (err) {
+    console.warn("slider status refresh failed", err);
+  }
+}
+
 async function renderFromSliders(options = {}) {
   if (!Array.isArray(sliderState) || !sliderState.length) return;
   const source = options && options.source ? String(options.source) : null;
@@ -897,4 +925,46 @@ async function renderFromSliders(options = {}) {
 
 if (renderBtn) {
   renderBtn.addEventListener("click", renderFromSliders);
+}
+
+function cacheBustImg(img) {
+  if (!img) return;
+  const raw = (img.dataset && img.dataset.src) ? img.dataset.src : img.src;
+  if (!raw) return;
+  const canonical = raw.split("?")[0];
+  if (!canonical) return;
+  img.src = `${canonical}?r=${Date.now()}`;
+}
+
+function refreshVisibleImages() {
+  cacheBustImg(referenceImg);
+  cacheBustImg(previewImg);
+  if (sliderList) {
+    sliderList.querySelectorAll(".slider-thumb img, .slider-thumb-preview img").forEach(cacheBustImg);
+  }
+}
+
+async function handleUiRefresh() {
+  if (!refreshUiBtn) return;
+  if (refreshUiBtn.disabled) return;
+  refreshUiBtn.disabled = true;
+  const prevStatus = statusEl ? statusEl.textContent : "";
+  if (statusEl) statusEl.textContent = "Refreshing UI…";
+  try {
+    await refreshSliderStatus();
+    if (statusEl) statusEl.textContent = "Refreshed latest render.";
+  } catch (err) {
+    if (statusEl) statusEl.textContent = "Refresh failed. Please try again.";
+  } finally {
+    refreshUiBtn.disabled = false;
+    setTimeout(() => {
+      if (statusEl && statusEl.textContent && statusEl.textContent.startsWith("Refresh")) {
+        statusEl.textContent = prevStatus;
+      }
+    }, 1800);
+  }
+}
+
+if (refreshUiBtn) {
+  refreshUiBtn.addEventListener("click", handleUiRefresh);
 }

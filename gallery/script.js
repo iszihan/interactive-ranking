@@ -21,6 +21,7 @@ const descriptionClose = document.getElementById("descriptionClose");
 const tutorialToggle = document.getElementById("tutorialToggle");
 const tutorialOverlay = document.getElementById("tutorialOverlay");
 const tutorialClose = document.getElementById("tutorialClose");
+const refreshUiBtn = document.getElementById("refreshUiBtn");
 const demoOverlay = document.getElementById("demoOverlay");
 const demoClose = document.getElementById("demoClose");
 const demoForm = document.getElementById("demoForm");
@@ -642,9 +643,78 @@ function renderPlaceholders(n) {
   }
 }
 
-function renderImageList(images) {
+function slotIndexFromCanonical(canonical) {
+  if (typeof canonical !== "string") return null;
+  const match = canonical.match(/slot-(\d+)/);
+  if (!match) return null;
+  const idx = Number(match[1]);
+  return Number.isFinite(idx) ? idx : null;
+}
+
+function populateBrickWithImage(brick, normalized) {
+  if (!brick || !normalized || !normalized.canonical) return;
+  let img = brick.querySelector("img");
+  if (!img) {
+    img = document.createElement("img");
+    img.alt = "";
+    img.style.maxWidth = "100%";
+    img.style.display = "block";
+    brick.innerHTML = "";
+    brick.appendChild(img);
+  }
+
+  const canonical = normalized.canonical;
+  img.src = `${canonical}?v=${Date.now()}`;
+  img.dataset.basename = canonical.split("/").pop();
+  img.dataset.src = canonical;
+
+  rememberImageSafety(canonical, normalized.isSafe);
+  applySafetyOverlay(brick, normalized.isSafe);
+
+  const overlay = brick.querySelector(".loading");
+  if (overlay) overlay.remove();
+}
+
+function renderImageList(images, options = {}) {
   if (!container) return 0;
   const list = Array.isArray(images) ? images : [];
+  const expectedCount = Number.isFinite(options.expectedCount) ? Math.max(0, options.expectedCount) : null;
+  const normalizedList = [];
+  for (const entry of list) {
+    const normalized = normalizeImageEntry(entry);
+    const canonical = normalized?.canonical || canonicalizeImageSrc(normalized?.url);
+    if (!canonical) continue;
+    normalizedList.push({ ...normalized, canonical });
+  }
+
+  // If we know more images are expected than currently exist, keep placeholders visible.
+  if (expectedCount && expectedCount > normalizedList.length) {
+    renderPlaceholders(expectedCount);
+    normalizedList.forEach((normalized) => {
+      const slotIdx = slotIndexFromCanonical(normalized.canonical);
+      let brick = null;
+      if (slotIdx !== null) {
+        brick = container.querySelector(`.brick[data-slot="${slotIdx}"]`);
+      }
+      if (!brick) {
+        brick = container.querySelector(".brick:not(.filled)") || null;
+      }
+      if (!brick) {
+        brick = document.createElement("div");
+        brick.className = "brick";
+        container.appendChild(brick);
+      }
+      brick.classList.add("filled");
+      populateBrickWithImage(brick, normalized);
+    });
+    container.querySelectorAll(".brick.filled").forEach((b) => b.classList.remove("filled"));
+
+    if (rankSection) rankSection.classList.remove("hidden");
+    if (nextWrap) nextWrap.classList.remove("hidden");
+
+    setTilesPerRow(expectedCount || 6);
+    return expectedCount;
+  }
 
   container.innerHTML = "";
   clearZoomSelection();
@@ -653,26 +723,11 @@ function renderImageList(images) {
   container.style.overflow = "visible";
 
   let rendered = 0;
-  for (const entry of list) {
-    const normalized = normalizeImageEntry(entry);
-    const canonical = normalized?.canonical || canonicalizeImageSrc(normalized?.url);
-    if (!canonical) continue;
-
+  for (const normalized of normalizedList) {
+    const canonical = normalized.canonical;
     const div = document.createElement("div");
     div.className = "brick";
-    const img = document.createElement("img");
-
-    img.src = `${canonical}?v=${Date.now()}`;
-    img.alt = "";
-    img.style.maxWidth = "100%";
-    img.style.display = "block";
-    img.dataset.basename = canonical.split("/").pop();
-    img.dataset.src = canonical;
-
-    rememberImageSafety(canonical, normalized.isSafe);
-    applySafetyOverlay(div, normalized.isSafe);
-
-    div.appendChild(img);
+    populateBrickWithImage(div, normalized);
     container.appendChild(div);
     rendered += 1;
   }
@@ -680,8 +735,8 @@ function renderImageList(images) {
   if (rankSection) rankSection.classList.remove("hidden");
   if (nextWrap) nextWrap.classList.remove("hidden");
 
-  setTilesPerRow(rendered || 6);
-  return rendered;
+  setTilesPerRow((expectedCount && expectedCount > rendered) ? expectedCount : (rendered || 6));
+  return (expectedCount && expectedCount > rendered) ? expectedCount : rendered;
 }
 
 async function setSlotImage(slot, round) {
@@ -804,9 +859,32 @@ async function refreshStageStatus() {
     if (data && data.stage) {
       applyStagePayload(data.stage);
     }
-    if (data && Array.isArray(data.images) && data.images.length) {
-      renderImageList(data.images);
-      refreshSafetyFromServer();
+
+    const serverExpected = Number.isFinite(data?.expected) ? Number(data.expected) : null;
+    if (serverExpected !== null) {
+      expected = serverExpected;
+      setTilesPerRow(expected || 6);
+    }
+
+    if (Number.isFinite(data?.round)) {
+      currentRound = Number(data.round);
+    }
+    if (Number.isFinite(data?.iteration)) {
+      setIterationDisplay(Number(data.iteration));
+    }
+
+    const imagesFromServer = Array.isArray(data?.images) ? data.images : [];
+    received = imagesFromServer.length;
+
+    const targetExpected = serverExpected ?? expected ?? imagesFromServer.length;
+
+    renderImageList(imagesFromServer, { expectedCount: targetExpected });
+    refreshSafetyFromServer();
+
+    const inflight = Boolean(data?.inflight) || (targetExpected && received < targetExpected);
+    isGenerationInFlight = inflight;
+    if (inflight && statusEl && targetExpected) {
+      statusEl.textContent = `Loaded ${received}/${targetExpected}`;
     }
   } catch (err) {
     console.warn("stage status refresh failed", err);
@@ -814,6 +892,31 @@ async function refreshStageStatus() {
 }
 
 refreshStageStatus();
+
+async function handleUiRefresh() {
+  if (!refreshUiBtn) return;
+  if (refreshUiBtn.disabled) return;
+  refreshUiBtn.disabled = true;
+  const prevStatus = statusEl ? statusEl.textContent : "";
+  if (statusEl) statusEl.textContent = "Refreshing images…";
+  try {
+    await refreshStageStatus();
+    if (statusEl) statusEl.textContent = "Refresh requested. Reloading images…";
+  } catch (err) {
+    if (statusEl) statusEl.textContent = "Refresh failed. Please try again.";
+  } finally {
+    refreshUiBtn.disabled = false;
+    setTimeout(() => {
+      if (statusEl && statusEl.textContent && statusEl.textContent.startsWith("Refresh")) {
+        statusEl.textContent = prevStatus;
+      }
+    }, 1800);
+  }
+}
+
+if (refreshUiBtn) {
+  refreshUiBtn.addEventListener("click", handleUiRefresh);
+}
 
 // ---------- ranking ----------
 function getSelection() {

@@ -105,7 +105,8 @@ body.no-scroll{
 }
 
 .description-button,
-.tutorial-button{
+.tutorial-button,
+.refresh-button{
   position: fixed;
   right: 32px;
   appearance: none;
@@ -123,19 +124,27 @@ body.no-scroll{
   transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.2s ease;
 }
 
-.tutorial-button{ bottom: 32px; }
-.description-button{ bottom: 88px; }
+.description-button{ bottom: 148px; }
+.tutorial-button{ bottom: 92px; }
+.refresh-button{
+  bottom: 24px;
+  background: linear-gradient(135deg, #ffd85a, #f5a623);
+  box-shadow: 0 12px 30px rgba(248, 180, 56, 0.35);
+  color: #2d2005;
+}
 
 .description-button:hover,
-.tutorial-button:hover{
+.tutorial-button:hover,
+.refresh-button:hover{
   transform: translateY(-2px);
   box-shadow: 0 16px 34px rgba(47, 75, 191, 0.4);
 }
 
 .description-button:active,
-.tutorial-button:active{
+.tutorial-button:active,
+.refresh-button:active{
   transform: translateY(1px);
-  box-shadow: 0 8px 24px rgba(47, 75, 191, 0.3);
+  box-shadow: 0 8px 24px rgba(248, 180, 56, 0.3);
 }
 
 .description-overlay{

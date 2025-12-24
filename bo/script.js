@@ -21,6 +21,7 @@ const descriptionClose = document.getElementById("descriptionClose");
 const tutorialToggle = document.getElementById("tutorialToggle");
 const tutorialOverlay = document.getElementById("tutorialOverlay");
 const tutorialClose = document.getElementById("tutorialClose");
+const refreshUiBtn = document.getElementById("refreshUiBtn");
 const demoOverlay = document.getElementById("demoOverlay");
 const demoClose = document.getElementById("demoClose");
 const demoForm = document.getElementById("demoForm");
@@ -882,6 +883,31 @@ async function refreshStageStatus() {
 }
 
 refreshStageStatus();
+
+async function handleUiRefresh() {
+  if (!refreshUiBtn) return;
+  if (refreshUiBtn.disabled) return;
+  refreshUiBtn.disabled = true;
+  const prevStatus = statusEl ? statusEl.textContent : "";
+  if (statusEl) statusEl.textContent = "Refreshing images…";
+  try {
+    await refreshStageStatus();
+    if (statusEl) statusEl.textContent = "Refresh requested. Reloading images…";
+  } catch (err) {
+    if (statusEl) statusEl.textContent = "Refresh failed. Please try again.";
+  } finally {
+    refreshUiBtn.disabled = false;
+    setTimeout(() => {
+      if (statusEl && statusEl.textContent && statusEl.textContent.startsWith("Refresh")) {
+        statusEl.textContent = prevStatus;
+      }
+    }, 1800);
+  }
+}
+
+if (refreshUiBtn) {
+  refreshUiBtn.addEventListener("click", handleUiRefresh);
+}
 
 // ---------- ranking ----------
 function getRanking() {

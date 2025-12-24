@@ -513,6 +513,7 @@ class Engine:
         }
 
     def _warmup_gpu_pool(self) -> None:
+        return  # --- IGNORE ---
         if not self.gpu_pool or self._pool_warmed:
             return
 
@@ -991,9 +992,36 @@ def health() -> dict:
 @app.get("/api/stage/status")
 async def api_stage_status() -> JSONResponse:
     # Gallery workflow does not use stages; return empty stage state for parity.
+    images = _list_image_urls()
+
+    eng = engine
+    ctx = getattr(eng, "last_round_context", {}) if eng else {}
+
+    expected: int | None = None
+    round_id: int | None = None
+    iteration: int | None = None
+
+    if isinstance(ctx, dict):
+        round_id = ctx.get("round") if isinstance(ctx.get("round"), int) else None
+        iter_candidate = ctx.get("iteration", ctx.get("step"))
+        if isinstance(iter_candidate, int):
+            iteration = iter_candidate
+        n_ctx = ctx.get("n")
+        if isinstance(n_ctx, int):
+            expected = n_ctx
+
+    if expected is None:
+        expected = len(images)
+
+    inflight = bool(expected is not None and len(images) < expected)
+
     return JSONResponse({
         "stage": None,
-        "images": _list_image_urls(),
+        "images": images,
+        "expected": int(expected) if expected is not None else None,
+        "inflight": inflight,
+        "round": int(round_id) if round_id is not None else None,
+        "iteration": int(iteration) if iteration is not None else None,
     })
 
 

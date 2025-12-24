@@ -5,6 +5,11 @@ from multiprocessing import Process, Queue, set_start_method
 from queue import Empty
 from itertools import count
 
+try:
+    import torch
+except ImportError:  # pragma: no cover
+    torch = None
+
 # Good practice with CUDA + multiprocessing
 try:
     set_start_method("spawn", force=True)
@@ -55,7 +60,25 @@ class MultiGPUInferPool:
         gpu_ids: list of ints, e.g. [0, 1, 2]
         module_name: Python module path where infer* functions live
         """
-        self.gpu_ids = list(gpu_ids)
+        raw_ids = [int(g) for g in gpu_ids]
+
+        available = 0
+        if torch and torch.cuda.is_available():
+            try:
+                available = int(torch.cuda.device_count())
+            except Exception:
+                available = 0
+
+        if available <= 0:
+            print("[MultiGPUInferPool] No CUDA devices detected; starting 0 workers.")
+            self.gpu_ids = []
+        else:
+            filtered = [gid for gid in raw_ids if 0 <= gid < available]
+            if len(filtered) < len(raw_ids):
+                print(f"[MultiGPUInferPool] Requested GPUs {raw_ids} exceed available {available}; using {filtered or 'none'}.")
+            # If still too many, trim to available count to avoid oversubscription.
+            self.gpu_ids = filtered[:available] if filtered else list(range(available))
+
         self.module_name = module_name
         self.task_queue = Queue()
         self.result_queue = Queue()

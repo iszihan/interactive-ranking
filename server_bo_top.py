@@ -604,6 +604,7 @@ class Engine:
         }
 
     def _warmup_gpu_pool(self) -> None:
+        return  # --- IGNORE ---
         if not self.gpu_pool or self._pool_warmed:
             return
 
@@ -1787,11 +1788,39 @@ async def next_step(req: NextRequest) -> JSONResponse:
 @app.get("/api/stage/status")
 async def api_stage_status() -> JSONResponse:
     eng = _require_engine()
+    images = _list_image_urls()
+
+    ctx = getattr(eng, "last_round_context", {}) if eng else {}
+
+    expected: int | None = None
+    round_id: int | None = None
+    iteration: int | None = None
+
+    if isinstance(ctx, dict):
+        round_id = ctx.get("round") if isinstance(ctx.get("round"), int) else None
+        iter_candidate = ctx.get("iteration", ctx.get("step"))
+        if isinstance(iter_candidate, int):
+            iteration = iter_candidate
+        n_ctx = ctx.get("n")
+        if isinstance(n_ctx, int):
+            expected = n_ctx
+
+    if expected is None:
+        expected = len(images)
+
+    inflight = bool(expected is not None and len(images) < expected)
+
+    top_k_val = getattr(eng, "top_k", None)
+
     return JSONResponse({
         "stage": eng.stage_status(),
-        "images": _list_image_urls(),
-        "top_k": getattr(eng, "top_k", None),
-        "ranking_prompt": _ranking_prompt(getattr(eng, "top_k", None)),
+        "images": images,
+        "top_k": top_k_val,
+        "ranking_prompt": _ranking_prompt(top_k_val),
+        "expected": int(expected) if expected is not None else None,
+        "inflight": inflight,
+        "round": int(round_id) if round_id is not None else None,
+        "iteration": int(iteration) if iteration is not None else None,
     })
 
 

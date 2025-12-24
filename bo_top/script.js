@@ -25,6 +25,7 @@ const descriptionClose = document.getElementById("descriptionClose");
 const tutorialToggle = document.getElementById("tutorialToggle");
 const tutorialOverlay = document.getElementById("tutorialOverlay");
 const tutorialClose = document.getElementById("tutorialClose");
+const refreshUiBtn = document.getElementById("refreshUiBtn");
 const demoOverlay = document.getElementById("demoOverlay");
 const demoClose = document.getElementById("demoClose");
 const demoForm = document.getElementById("demoForm");
@@ -953,29 +954,85 @@ function renderPlaceholders(n) {
   renderRankingFromSelection({ showLoading: true });
 }
 
-function renderImageList(images) {
+function slotIndexFromCanonical(canonical) {
+  if (typeof canonical !== "string") return null;
+  const match = canonical.match(/slot-(\d+)/);
+  if (!match) return null;
+  const idx = Number(match[1]);
+  return Number.isFinite(idx) ? idx : null;
+}
+
+function renderImageList(images, options = {}) {
   if (!container) return 0;
   const list = Array.isArray(images) ? images : [];
+  const preserveSelection = Boolean(options.preserveSelection);
+  const expectedCount = Number.isFinite(options.expectedCount) ? Math.max(0, options.expectedCount) : null;
+  const prevSelected = preserveSelection ? [...selectedOrder] : [];
+  const prevZoom = preserveSelection ? (zoomImg?.dataset?.src || null) : null;
 
-  candidates = [];
+  const normalizedList = [];
   list.forEach((entry, idx) => {
     const normalized = normalizeImageEntry(entry);
     const canonical = normalized?.canonical || canonicalizeImageSrc(normalized?.url);
     if (!canonical) return;
-    candidates.push({
-      slot: idx,
-      canonical,
-      basename: canonical.split("/").pop(),
-      isSafe: normalized.isSafe,
-      loaded: true,
-    });
+    const slot = slotIndexFromCanonical(canonical);
+    normalizedList.push({ ...normalized, canonical, slot: Number.isFinite(slot) ? slot : idx });
   });
 
-  resetSelectionToCandidateOrder();
+  let targetCount = normalizedList.length;
+  if (expectedCount !== null) {
+    targetCount = Math.max(targetCount, expectedCount);
+  }
+
+  const nextCandidates = [];
+  const ensureSlot = (idx) => {
+    while (nextCandidates.length <= idx) {
+      const i = nextCandidates.length;
+      nextCandidates.push({
+        slot: i,
+        canonical: `${SLOTS_BASE}/slot-${i}.png`,
+        basename: `slot-${i}.png`,
+        isSafe: null,
+        loaded: false,
+      });
+    }
+  };
+
+  normalizedList.forEach((normalized, idx) => {
+    const slot = Number.isFinite(normalized.slot) ? normalized.slot : idx;
+    ensureSlot(slot);
+    nextCandidates[slot] = {
+      slot,
+      canonical: normalized.canonical,
+      basename: normalized.canonical.split("/").pop(),
+      isSafe: normalized.isSafe,
+      loaded: true,
+    };
+  });
+
+  for (let i = 0; i < targetCount; i++) {
+    ensureSlot(i);
+  }
+
+  candidates = nextCandidates;
+
+  if (preserveSelection) {
+    const validCanonicals = new Set(candidates.map((c) => c.canonical));
+    selectedOrder = prevSelected.filter((c) => validCanonicals.has(c));
+    clampSelectionToLimit();
+  } else {
+    resetSelectionToCandidateOrder();
+  }
+
   renderGrid({ showLoading: false });
   const rendered = renderRankingFromSelection({ showLoading: false });
   syncSelectionStyles();
-  return rendered;
+
+  if (preserveSelection && prevZoom) {
+    setZoomByCanonical(prevZoom);
+  }
+
+  return Math.max(targetCount, rendered);
 }
 
 async function setSlotImage(slot, round) {
@@ -1124,8 +1181,31 @@ async function refreshStageStatus() {
     if (data && data.stage) {
       applyStagePayload(data.stage);
     }
-    if (data && Array.isArray(data.images) && data.images.length) {
-      renderImageList(data.images);
+    const serverExpected = Number.isFinite(data?.expected) ? Number(data.expected) : null;
+    if (serverExpected !== null) {
+      expected = serverExpected;
+      setTilesPerRow(expected || 6);
+    }
+
+    if (Number.isFinite(data?.round)) {
+      currentRound = Number(data.round);
+    }
+    if (Number.isFinite(data?.iteration)) {
+      setIterationDisplay(Number(data.iteration));
+    }
+
+    const imagesFromServer = Array.isArray(data?.images) ? data.images : [];
+    received = imagesFromServer.length;
+
+    const targetExpected = serverExpected ?? expected ?? imagesFromServer.length;
+
+    renderImageList(imagesFromServer, { preserveSelection: true, expectedCount: targetExpected });
+    refreshSafetyFromServer();
+
+    const inflight = Boolean(data?.inflight) || (targetExpected && received < targetExpected);
+    isGenerationInFlight = inflight;
+    if (inflight && statusEl && targetExpected) {
+      statusEl.textContent = `Loaded ${received}/${targetExpected}`;
     }
   } catch (err) {
     console.warn("stage status refresh failed", err);
@@ -1133,6 +1213,31 @@ async function refreshStageStatus() {
 }
 
 refreshStageStatus();
+
+async function handleUiRefresh() {
+  if (!refreshUiBtn) return;
+  if (refreshUiBtn.disabled) return;
+  refreshUiBtn.disabled = true;
+  const prevStatus = statusEl ? statusEl.textContent : "";
+  if (statusEl) statusEl.textContent = "Refreshing images…";
+  try {
+    await refreshStageStatus();
+    if (statusEl) statusEl.textContent = "Refresh requested. Reloading images…";
+  } catch (err) {
+    if (statusEl) statusEl.textContent = "Refresh failed. Please try again.";
+  } finally {
+    refreshUiBtn.disabled = false;
+    setTimeout(() => {
+      if (statusEl && statusEl.textContent && statusEl.textContent.startsWith("Refresh")) {
+        statusEl.textContent = prevStatus;
+      }
+    }, 1800);
+  }
+}
+
+if (refreshUiBtn) {
+  refreshUiBtn.addEventListener("click", handleUiRefresh);
+}
 
 // ---------- ranking ----------
 function getRanking() {

@@ -473,6 +473,7 @@ class Engine:
         }
 
     def _warmup_gpu_pool(self) -> None:
+        return # --- IGNORE ---
         if not self.gpu_pool or self._pool_warmed:
             return
 
@@ -1069,6 +1070,33 @@ def start() -> JSONResponse:
         images = _list_image_urls()
         if images:
             latest_image = images[-1]
+
+    iteration = eng.get_slider_iteration()
+    return JSONResponse({
+        "gt_image": gt_url,
+        "iteration": iteration,
+        "slider": slider_meta,
+        "latest_image": latest_image,
+        "history": history_payload,
+    }, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/slider/status")
+def slider_status() -> JSONResponse:
+    eng = _require_engine()
+    gt_url = eng.get_gt_image_url()
+    slider_meta = eng.get_slider_metadata()
+    history_payload = eng.get_slider_history_payload()
+
+    latest_image = None
+    if history_payload:
+        latest_entry = history_payload[0]
+        latest_image = latest_entry.get("image")
+
+    if latest_image is None:
+        images = _list_image_urls()
+        if images:
+            latest_image = images[-1].get("url") if isinstance(images[-1], dict) else images[-1]
 
     iteration = eng.get_slider_iteration()
     return JSONResponse({
