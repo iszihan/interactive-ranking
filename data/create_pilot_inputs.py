@@ -323,6 +323,37 @@ def normalize_interface_name(name: str) -> str:
     return cleaned
 
 
+def parse_ports(ports_arg: Optional[str], participants_count: int, requested_par: Optional[int]) -> List[int]:
+    """Parse a comma-separated ports string or generate a default range.
+
+    If ports are omitted, use the requested participant count (par) when provided;
+    otherwise fall back to the inferred participant count, assigning sequential
+    ports starting at 8000.
+    """
+    if participants_count <= 0:
+        raise ValueError("participants_count must be positive to assign ports.")
+
+    default_count = requested_par if requested_par is not None else participants_count
+    if default_count <= 0:
+        raise ValueError("Participant count must be positive to assign ports.")
+
+    if ports_arg is None:
+        return [8000 + i for i in range(default_count)]
+
+    parts = [p.strip() for p in ports_arg.split(",") if p.strip()]
+    try:
+        ports = [int(p) for p in parts]
+    except ValueError as exc:
+        raise ValueError("--ports must be a comma-separated list of integers.") from exc
+
+    if len(ports) != default_count:
+        raise ValueError(
+            f"--ports must provide exactly {default_count} entries; got {len(ports)}."
+        )
+
+    return ports
+
+
 def parse_template_args(template_args: List[str]) -> List[Tuple[str, str]]:
     if not template_args:
         raise ValueError(
@@ -387,19 +418,39 @@ def infer_participants_count(total_available: int, requested: Optional[int]) -> 
     return requested
 
 
+def _balanced_orders_three(names: List[str]) -> List[List[str]]:
+    """Balanced Latin square orders for 3 interfaces (size=3, 6 rows)."""
+    if len(names) != 3:
+        raise ValueError("Balanced ordering is implemented for exactly 3 interfaces.")
+    a, b, c = names
+    return [
+        [a, b, c],
+        [b, c, a],
+        [c, a, b],
+        [a, c, b],
+        [c, b, a],
+        [b, a, c],
+    ]
+
+
 def build_task_plan(
     participants: int,
     template_specs: List[Tuple[str, str]],
     seed: int,
-) -> List[Dict[str, int]]:
-    rng = random.Random(seed)
+) -> Tuple[List[Dict[str, int]], Dict[str, List[List[str]]]]:
+    names = [name for name, _ in template_specs]
+    orders = _balanced_orders_three(names)
+
     plan: List[Dict[str, int]] = []
+    debug_assignment: Dict[str, List[List[str]]] = {}
 
     for pid in range(1, participants + 1):
+        pid_key = f"P{pid:02d}"
+        debug_assignment[pid_key] = []
         for session_id in range(1, SESSIONS_PER_PARTICIPANT + 1):
-            session_templates = list(template_specs)
-            rng.shuffle(session_templates)
-            for task_in_session, (name, _) in enumerate(session_templates, start=1):
+            order = orders[(pid - 1 + (session_id - 1)) % len(orders)]
+            debug_assignment[pid_key].append(order)
+            for task_in_session, name in enumerate(order, start=1):
                 plan.append(
                     {
                         "participant": pid,
@@ -409,7 +460,7 @@ def build_task_plan(
                     }
                 )
 
-    return plan
+    return plan, debug_assignment
 
 
 def format_weight(w: float) -> str:
@@ -448,6 +499,7 @@ def main(
     offset: int = 0,
     shuffle_weights: bool = True,
     seed: int = 0,
+    ports: Optional[str] = None,
 ):
     os.makedirs(out_dir, exist_ok=True)
 
@@ -540,8 +592,11 @@ def main(
             others = [tpl for tpl in template_specs if tpl[0].lower() != "slider"]
             tutorial_order = slider_first + others
 
+        tasks_info = []
+
         for pid in range(1, participants_count + 1):
             p_tag = f"P{pid:02d}_tut"
+            pid_plain = p_tag.split("_")[0]
             s_tag = "S1"
             for task_idx, (iface_name, _) in enumerate(tutorial_order, start=1):
                 prompt, weights = interface_gt[iface_name]
@@ -562,11 +617,92 @@ def main(
                 with open(filename, "w") as f:
                     yaml.safe_dump(cfg, f, sort_keys=False)
 
+                tasks_info.append({
+                    "pid_tag": p_tag,
+                    "pid_plain": pid_plain,
+                    "s_tag": s_tag,
+                    "t_tag": t_tag,
+                    "iface": iface_name,
+                    "config_path": filename,
+                    "output_dir": output_dir_value,
+                    "init_dir": init_dir_value,
+                })
+
                 print(f"Wrote {filename} | prompt: {prompt}")
+
+        ports_list = parse_ports(ports, participants_count, participants)
+
+        clean_cmds = []
+        precompute_cmds = []
+        demo_cmds = []
+        run_cmds = []
+
+        for info in tasks_info:
+            clean_cmds.append(
+                f"rm -rf {info['init_dir']}/* {info['output_dir']}/*"
+            )
+            precompute_cmds.append(
+                f"python ./server_{info['iface']}.py --config {info['config_path']} --precompute"
+            )
+
+        # Demographic command per participant, using the first tutorial task (S1_T01)
+        pid_to_first_task = {}
+        for info in tasks_info:
+            if info['pid_plain'] not in pid_to_first_task and info['t_tag'] == "T01":
+                pid_to_first_task[info['pid_plain']] = info
+
+        for idx, pid_plain in enumerate(sorted(pid_to_first_task.keys())):
+            task = pid_to_first_task[pid_plain]
+            port = ports_list[idx]
+            demo_cmds.append(
+                """
+PORT={port}; PID={pid}; \
+python ./server_{iface}.py --port ${{PORT}} --demographic ${{PID}} --config {cfg} --ssh >server_${{PID}}.log 2>&1
+""".strip().format(port=port, pid=pid_plain, iface=task['iface'], cfg=task['config_path'])
+            )
+
+        # Actual session run commands for all tutorial tasks
+        pid_to_port = {f"P{idx+1:02d}": port for idx, port in enumerate(ports_list)}
+        for info in tasks_info:
+            pid_key = info['pid_plain']
+            port = pid_to_port.get(pid_key, ports_list[0])
+            run_cmds.append(
+                """
+PORT={port}; STATE_DIR={state_dir}; LOG_DIR=.; \
+STATE_PATH="${{STATE_DIR}}/{pid_tag}/{pid_tag}_{s}_{iface}_{t}"; LOG_PATH="${{LOG_DIR}}/server_{pid}_{s}_{iface}_{t}.log"; \
+python "./server_{iface}.py" --port "${{PORT}}" --save-state-dir "${{STATE_PATH}}" --ssh --config {cfg} >"${{LOG_PATH}}" 2>&1
+""".strip().format(
+                    pid=pid_key,
+                    s=info['s_tag'],
+                    iface=info['iface'],
+                    t=info['t_tag'],
+                    port=port,
+                    state_dir=output_parent,
+                    pid_tag=info['pid_tag'],
+                    cfg=info['config_path'],
+                )
+            )
 
         print(
             f"Done. Tutorial mode wrote {total_needed} config files for {participants_count} participants to: {out_dir}"
         )
+
+        print("\n# Clean generated folders")
+        for cmd in clean_cmds:
+            print(cmd)
+
+        print("\n# Precompute commands")
+        for cmd in precompute_cmds:
+            print(cmd)
+
+        print("\n# Demographic commands")
+        for cmd in demo_cmds:
+            print(cmd)
+
+        print("\n# Tutorial session run commands")
+        for cmd in run_cmds:
+            print(cmd)
+
         return
 
     participants_count = infer_participants_count(available, participants)
@@ -580,7 +716,9 @@ def main(
 
     gt_entries = filtered_entries[:total_needed]
 
-    task_plan = build_task_plan(participants_count, template_specs, seed)
+    task_plan, debug_assignment = build_task_plan(participants_count, template_specs, seed)
+
+    tasks_info = []
 
     for (prompt, weights), task in zip(gt_entries, task_plan):
         p_tag = f"P{task['participant']:02d}"
@@ -602,11 +740,73 @@ def main(
         with open(filename, "w") as f:
             yaml.safe_dump(cfg, f, sort_keys=False)
 
+        tasks_info.append({
+            "pid_tag": p_tag,
+            "pid_plain": p_tag,
+            "s_tag": s_tag,
+            "t_tag": t_tag,
+            "iface": task['template_name'],
+            "config_path": filename,
+            "output_dir": output_dir_value,
+            "init_dir": init_dir_value,
+        })
+
         print(f"Wrote {filename} | prompt: {prompt}")
+
+    ports_list = parse_ports(ports, participants_count, participants)
+
+    clean_cmds = []
+    precompute_cmds = []
+    run_cmds = []
+
+    for info in tasks_info:
+        clean_cmds.append(
+            f"rm -rf {info['init_dir']}/* {info['output_dir']}/*"
+        )
+        precompute_cmds.append(
+            f"python ./server_{info['iface']}.py --config {info['config_path']} --precompute"
+        )
+
+    pid_to_port = {f"P{idx+1:02d}": port for idx, port in enumerate(ports_list)}
+    for info in tasks_info:
+        port = pid_to_port.get(info['pid_plain'], ports_list[0])
+        run_cmds.append(
+            """
+PORT={port}; STATE_DIR={state_dir}; LOG_DIR=.; \
+STATE_PATH="${{STATE_DIR}}/{pid_tag}/{pid_tag}_{s}_{iface}_{t}"; LOG_PATH="${{LOG_DIR}}/server_{pid}_{s}_{iface}_{t}.log"; \
+python "./server_{iface}.py" --port "${{PORT}}" --save-state-dir "${{STATE_PATH}}" --ssh --config {cfg} >"${{LOG_PATH}}" 2>&1
+""".strip().format(
+                pid=info['pid_plain'],
+                s=info['s_tag'],
+                iface=info['iface'],
+                t=info['t_tag'],
+                port=port,
+                state_dir=output_parent,
+                pid_tag=info['pid_tag'],
+                cfg=info['config_path'],
+            )
+        )
 
     print(
         f"Done. Wrote {total_needed} config files for {participants_count} participants to: {out_dir}"
     )
+
+    print("\n# Interface order (balanced Latin square)")
+    for pid_key, orders in debug_assignment.items():
+        for session_idx, order in enumerate(orders, start=1):
+            print(f"{pid_key} session {session_idx}: {', '.join(order)}")
+
+    print("\n# Clean generated folders")
+    for cmd in clean_cmds:
+        print(cmd)
+
+    print("\n# Precompute commands")
+    for cmd in precompute_cmds:
+        print(cmd)
+
+    print("\n# Session run commands")
+    for cmd in run_cmds:
+        print(cmd)
 
 
 if __name__ == "__main__":
@@ -648,6 +848,12 @@ if __name__ == "__main__":
                         help="Do not shuffle generated weight combinations.")
     parser.add_argument("--seed", type=int, default=0,
                         help="Random seed for generation and shuffling.")
+    parser.add_argument(
+        "--ports",
+        type=str,
+        default=None,
+        help="Comma-separated list of ports (one per participant). Defaults to sequential ports starting at 8000 if omitted.",
+    )
 
     args = parser.parse_args()
     main(
@@ -660,4 +866,5 @@ if __name__ == "__main__":
         offset=args.offset,
         shuffle_weights=not args.no_shuffle,
         seed=args.seed,
+        ports=args.ports,
     )

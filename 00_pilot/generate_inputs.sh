@@ -5,8 +5,8 @@ python data/create_pilot_inputs.py \
   --template bo_top=./official_config/config.yml \
   --template gallery=./official_config/config_gallery.yml \
   --template slider=./official_config/config_slider.yml \
-  --par 2 \
-  --seed 0;
+  --par 4 \
+  --seed 0 > ./00_pilot/run_sessions.sh;
 
 python data/create_pilot_inputs.py \
   --classes-json /scratch/ondemand29/chenxil/code/mood-board/evaluations/classes.json \
@@ -16,5 +16,5 @@ python data/create_pilot_inputs.py \
   --template gallery=./config_gallery.yml \
   --template slider=./config_slider.yml \
   --tutorial \
-  --par 2 \
-  --seed 0;
+  --par 4 \
+  --seed 0  > ./00_pilot/run_init.sh;
