@@ -136,15 +136,19 @@ if _env_state_save_override:
 app = FastAPI()
 DEMO_ENABLED: bool = False
 DEMO_PARTICIPANT_ID: str | None = None
+PRECOMPUTE_ENABLED: bool = False
 
 # Allow demographics to be set via environment (mirrors state-path handling)
 _env_demo_enabled = os.environ.get("DEMOGRAPHIC_ENABLED")
 _env_demo_participant = os.environ.get("DEMOGRAPHIC_PARTICIPANT_ID")
+_env_precompute_enabled = os.environ.get("PRECOMPUTE_ENABLED")
 if _env_demo_enabled:
     DEMO_ENABLED = str(_env_demo_enabled).lower() in {"1", "true", "yes", "on"}
 if _env_demo_participant:
     DEMO_PARTICIPANT_ID = _env_demo_participant
     DEMO_ENABLED = True
+if _env_precompute_enabled:
+    PRECOMPUTE_ENABLED = str(_env_precompute_enabled).lower() in {"1", "true", "yes", "on"}
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -190,6 +194,19 @@ async def _init_engine_once():
             state_path=STATE_PATH_OVERRIDE,
             save_state_dir=STATE_SAVE_DIR_OVERRIDE,
         )
+    eng = engine
+    if eng is None:
+        raise RuntimeError("Engine failed to initialize before precompute.")
+    if PRECOMPUTE_ENABLED:
+        print("[precompute] Starting precompute at startup…")
+        # Gallery Engine.start is async; call directly when coroutine, else thread it.
+        if asyncio.iscoroutinefunction(eng.start):
+            await eng.start()
+        else:
+            await asyncio.to_thread(eng.start)
+        print("[precompute] Precompute complete; exiting.")
+        _shutdown_gpu_pool(save_state=True)
+        os._exit(0)
 
 
 @app.on_event("shutdown")
@@ -1474,6 +1491,8 @@ if __name__ == "__main__":
                         help="Participant ID to enable demographic collection")
     parser.add_argument("--config", dest="config_path", type=str,
                         help="Path to config file override")
+    parser.add_argument("--precompute", action="store_true",
+                        help="Enable precompute mode (also via PRECOMPUTE_ENABLED env)")
     parser.add_argument("--port", dest="port", type=int, default=8000,
                         help="Port to bind the server (default: 8000)")
     parser.add_argument("--ssh", action="store_true",
@@ -1506,6 +1525,11 @@ if __name__ == "__main__":
         os.environ["CONFIG_PATH_OVERRIDE"] = str(config_override)
         CONFIG_FILE = config_override.resolve()
         print(f"[cli] Using config override: {CONFIG_FILE}")
+
+    if args.precompute:
+        PRECOMPUTE_ENABLED = True
+        os.environ["PRECOMPUTE_ENABLED"] = "1"
+        print("[cli] Precompute enabled")
 
     _register_shutdown_handlers()
     host = "127.0.0.1" if not args.ssh else "0.0.0.0"
