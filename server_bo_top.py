@@ -122,7 +122,7 @@ DEMO_DIR = OUTPUT_DIR / "demographics"
 DEMO_DIR.mkdir(parents=True, exist_ok=True)
 
 STATE_PATH_OVERRIDE: Path | None = None
-STATE_SAVE_PATH_OVERRIDE: Path | None = None
+STATE_SAVE_DIR_OVERRIDE: Path | None = None
 
 _env_state_override = os.environ.get("ENGINE_STATE_PATH_OVERRIDE")
 if _env_state_override:
@@ -132,16 +132,19 @@ if _env_state_override:
     except Exception as exc:
         print(f"[env] Failed to apply ENGINE_STATE_PATH_OVERRIDE: {exc}")
 
-_env_state_save_override = os.environ.get("ENGINE_STATE_SAVE_PATH_OVERRIDE")
+_env_state_save_override = os.environ.get("ENGINE_STATE_SAVE_DIR_OVERRIDE")
+if not _env_state_save_override:
+    _env_state_save_override = os.environ.get("ENGINE_STATE_SAVE_PATH_OVERRIDE")
+    if _env_state_save_override:
+        print("[env] ENGINE_STATE_SAVE_PATH_OVERRIDE is deprecated; use ENGINE_STATE_SAVE_DIR_OVERRIDE.")
 if _env_state_save_override:
     try:
-        STATE_SAVE_PATH_OVERRIDE = Path(
-            _env_state_save_override)
+        STATE_SAVE_DIR_OVERRIDE = Path(_env_state_save_override)
         print(
-            f"[env] Using engine save state path override: {STATE_SAVE_PATH_OVERRIDE}")
+            f"[env] Using engine save state dir override: {STATE_SAVE_DIR_OVERRIDE}")
     except Exception as exc:
         print(
-            f"[env] Failed to apply ENGINE_STATE_SAVE_PATH_OVERRIDE: {exc}")
+            f"[env] Failed to apply ENGINE_STATE_SAVE_DIR_OVERRIDE: {exc}")
 
 app = FastAPI()
 DEMO_ENABLED: bool = False
@@ -186,13 +189,13 @@ def _lazy_samplers(use_cached=True):
 
 @app.on_event("startup")
 async def _init_engine_once():
-    global engine, STATE_PATH_OVERRIDE, STATE_SAVE_PATH_OVERRIDE
+    global engine, STATE_PATH_OVERRIDE, STATE_SAVE_DIR_OVERRIDE
     if engine is None:
         engine = Engine(
             CONFIG_FILE,
             OUTPUT_DIR,
             state_path=STATE_PATH_OVERRIDE,
-            save_state_path=STATE_SAVE_PATH_OVERRIDE,
+            save_state_dir=STATE_SAVE_DIR_OVERRIDE,
         )
 
 
@@ -252,7 +255,7 @@ class Engine:
     """
 
     def __init__(self, config_path: Path, outputs_dir: Path, *, state_path: Path | None = None,
-                 save_state_path: Path | None = None) -> None:
+                 save_state_dir: Path | None = None) -> None:
         self.outputs_dir = outputs_dir
         print(f"Outputs dir: {self.outputs_dir}")
         self.clear_outputs()
@@ -260,7 +263,7 @@ class Engine:
         self.config_path = Path(config_path).resolve()
         self.config_snapshot: dict | None = None
         self.state_path: Path | None = None
-        self.save_state_path: Path | None = None
+        self.save_state_dir: Path | None = None
         self.autosave_enabled = True
         self.autoload_state = True
         self.state_loaded = False
@@ -293,11 +296,11 @@ class Engine:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
             print(f"Engine state path: {self.state_path}")
 
-        save_path = save_state_path
-        if save_path:
-            self.save_state_path = Path(save_path)
-            self.save_state_path.parent.mkdir(parents=True, exist_ok=True)
-            print(f"Engine save state path: {self.save_state_path}")
+        save_dir = save_state_dir
+        if save_dir:
+            self.save_state_dir = Path(save_dir)
+            self.save_state_dir.mkdir(parents=True, exist_ok=True)
+            print(f"Engine save state dir: {self.save_state_dir}")
 
         self.num_observations = config.get('num_observations', 10)
         self.init_dir = config.get('init_dir', None)
@@ -569,22 +572,22 @@ class Engine:
             "weight_idx": 1,
         }
 
-    def save_state(self, reason: str | None = None, path: Path | str | None = None, *, force: bool = False) -> Path | None:
-        target = path or self.save_state_path
-        if target is None:
-            print("No save-state path configured; skipping save.")
+    def save_state(self, reason: str | None = None, save_dir: Path | str | None = None, *, force: bool = False) -> Path | None:
+        target_dir = save_dir or self.save_state_dir
+        if target_dir is None:
+            print("No save-state dir configured; skipping save.")
             return None
-        target = Path(target)
-        if not force and not self.autosave_enabled and self.save_state_path and target == self.save_state_path:
+        target_dir = Path(target_dir)
+        if not force and not self.autosave_enabled and self.save_state_dir and target_dir == self.save_state_dir:
             print("Autosave disabled; skipping save.")
             return None
         try:
-            saved_path = save_engine_state(self, target, reason=reason)
+            saved_path = save_engine_state(self, target_dir, reason=reason)
             print(
                 f"Saved engine state to {saved_path} ({reason or 'unspecified'})")
             return saved_path
         except Exception as exc:
-            print(f"Failed to save engine state to {target}: {exc}")
+            print(f"Failed to save engine state to {target_dir}: {exc}")
             return None
 
     def load_state(self, path: Path | str | None = None, *, reset: bool = False, force: bool = False) -> bool:
@@ -1658,14 +1661,14 @@ def health() -> dict:
 def api_save_state(payload: dict | None = Body(default=None)) -> JSONResponse:
     eng = _require_engine()
     data = payload or {}
-    path = data.get("path")
+    save_dir = data.get("dir") or data.get("path")
     reason = data.get("reason") or "api"
     force = bool(data.get("force", False))
-    saved_path = eng.save_state(reason=reason, path=path, force=force)
+    saved_path = eng.save_state(reason=reason, save_dir=save_dir, force=force)
     if not saved_path:
         return JSONResponse({
             "saved": False,
-            "path": str(path) if path else None,
+            "path": str(save_dir) if save_dir else None,
         }, status_code=400)
     return JSONResponse({"saved": True, "path": str(saved_path)})
 
@@ -2084,8 +2087,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Interactive ranking server")
     parser.add_argument("--state-path", dest="state_path", type=str,
                         help="Override path used to load engine state")
-    parser.add_argument("--save-state-path", dest="save_state_path", type=str,
-                        help="Override path used when saving engine state")
+    parser.add_argument("--save-state-dir", dest="save_state_dir", type=str,
+                        help="Directory used when saving engine state (timestamped file names)")
+    parser.add_argument("--save-state-path", dest="save_state_dir", type=str,
+                        help="[Deprecated] Alias for --save-state-dir")
     parser.add_argument("--demographic", dest="demographic", type=str,
                         help="Participant ID to enable demographic collection")
     parser.add_argument("--config", dest="config_path", type=str,
@@ -2101,12 +2106,15 @@ if __name__ == "__main__":
         os.environ["ENGINE_STATE_PATH_OVERRIDE"] = str(STATE_PATH_OVERRIDE)
         print(f"[cli] Using engine state path override: {STATE_PATH_OVERRIDE}")
 
-    if args.save_state_path:
-        STATE_SAVE_PATH_OVERRIDE = Path(args.save_state_path).expanduser()
+    if args.save_state_dir:
+        STATE_SAVE_DIR_OVERRIDE = Path(args.save_state_dir).expanduser()
+        os.environ["ENGINE_STATE_SAVE_DIR_OVERRIDE"] = str(
+            STATE_SAVE_DIR_OVERRIDE)
+        # Keep the deprecated env var in sync for compatibility across processes.
         os.environ["ENGINE_STATE_SAVE_PATH_OVERRIDE"] = str(
-            STATE_SAVE_PATH_OVERRIDE)
+            STATE_SAVE_DIR_OVERRIDE)
         print(
-            f"[cli] Using engine save state path override: {STATE_SAVE_PATH_OVERRIDE}")
+            f"[cli] Using engine save state dir override: {STATE_SAVE_DIR_OVERRIDE}")
 
     if args.demographic:
         DEMO_ENABLED = True

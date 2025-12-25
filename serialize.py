@@ -15,6 +15,20 @@ if TYPE_CHECKING:  # pragma: no cover - type checking only
 ENGINE_STATE_VERSION = 1
 
 
+def build_state_save_path(target: Path | str) -> Path:
+    """Return a file path for saving, generating a timestamped name for dirs."""
+    candidate = Path(target)
+    if candidate.suffix:
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        return candidate
+
+    directory = candidate
+    stem = directory.name or "state"
+    directory.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return directory / f"{stem}_{timestamp}.json"
+
+
 def _tensor_to_list(value: Any) -> Any:
     if value is None:
         return None
@@ -169,8 +183,7 @@ def export_engine_state(engine: "Engine") -> Dict[str, Any]:
 
 
 def save_engine_state(engine: "Engine", path: Path | str, reason: str | None = None) -> Path:
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
+    p = build_state_save_path(path)
     state = export_engine_state(engine)
     state.setdefault("metadata", {})["reason"] = reason or "manual"
     with p.open("w", encoding="utf-8") as f:
@@ -379,8 +392,7 @@ def export_slider_state(engine: "Engine") -> Dict[str, Any]:
 
 
 def save_slider_state(engine: "Engine", path: Path | str, reason: str | None = None) -> Path:
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
+    p = build_state_save_path(path)
     state = export_slider_state(engine)
     state.setdefault("metadata", {})["reason"] = reason or "manual"
     with p.open("w", encoding="utf-8") as f:
