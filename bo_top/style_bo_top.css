@@ -321,10 +321,26 @@ body.no-scroll{
   gap: 12px;
   overflow-x: auto;
   overflow-y: visible;
-  padding: 36px 12px 8px;
+  padding: 36px 12px 40px;
   max-width: 100%;
   align-items: flex-start;
   flex: 1 1 auto;
+}
+
+#container .rank-number-badge{
+  position: absolute;
+  left: 50%;
+  bottom: -34px;
+  transform: translateX(-50%);
+  background: #111827;
+  color: #fff;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: 0.95rem;
+  letter-spacing: 0.06em;
+  box-shadow: 0 12px 30px rgba(0,0,0,0.18);
+  pointer-events: none;
 }
 
 
@@ -610,6 +626,21 @@ body.no-scroll{
   aspect-ratio: 1 / 1;
   box-shadow: 0 2px 8px rgba(0,0,0,0.05);
   cursor: pointer;
+}
+
+.grid-container .selection-rank-badge{
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  padding: 3px 7px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(245,124,0,0.9), rgba(242,161,11,0.9));
+  color: #fff;
+  font-weight: 700;
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  box-shadow: 0 6px 12px rgba(245,124,0,0.3);
+  pointer-events: none;
 }
 
 .grid-container .brick.selected{

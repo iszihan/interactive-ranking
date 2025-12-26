@@ -663,6 +663,7 @@ function onMouseUp() {
     .map((img) => img.dataset?.src || img.src)
     .filter(Boolean);
   syncSelectionStyles();
+  syncSelectionBadges();
   refreshExtremePills();
 
   if (!wasDrag) {
@@ -779,6 +780,8 @@ function renderGrid({ showLoading = false } = {}) {
   if (gridSection) {
     gridSection.classList.toggle("hidden", !list.length);
   }
+
+  syncSelectionBadges();
 }
 
 function renderRankingFromSelection({ showLoading = false } = {}) {
@@ -840,6 +843,7 @@ function renderRankingFromSelection({ showLoading = false } = {}) {
   setTilesPerRow(rendered || 6);
   syncSafetyOverlays();
   syncSelectionStyles();
+  syncSelectionBadges();
   updateActionButtons();
 
   const currentZoom = zoomImg?.dataset?.src || null;
@@ -865,6 +869,49 @@ function syncSelectionStyles() {
   }
 }
 
+function syncSelectionBadges() {
+  const rankByCanonical = new Map();
+  selectedOrder.forEach((canonical, idx) => {
+    rankByCanonical.set(canonical, idx + 1);
+  });
+
+  if (gridContainer) {
+    gridContainer.querySelectorAll(".brick").forEach((brick) => {
+      const canonical = brick.dataset?.canonical;
+      const rank = rankByCanonical.get(canonical);
+      let badge = brick.querySelector(".selection-rank-badge");
+      if (rank) {
+        if (!badge) {
+          badge = document.createElement("div");
+          badge.className = "selection-rank-badge";
+          brick.appendChild(badge);
+        }
+        badge.textContent = rank;
+      } else if (badge) {
+        badge.remove();
+      }
+    });
+  }
+
+  if (container) {
+    container.querySelectorAll(".brick").forEach((brick) => {
+      const canonical = brick.dataset?.canonical;
+      const rank = rankByCanonical.get(canonical);
+      let badge = brick.querySelector(".rank-number-badge");
+      if (rank) {
+        if (!badge) {
+          badge = document.createElement("div");
+          badge.className = "rank-number-badge";
+          brick.appendChild(badge);
+        }
+        badge.textContent = rank;
+      } else if (badge) {
+        badge.remove();
+      }
+    });
+  }
+}
+
 function toggleSelection(canonical) {
   if (!canonical) return;
   const limit = topK && topK > 0 ? topK : candidates.length;
@@ -882,6 +929,7 @@ function toggleSelection(canonical) {
 
   renderRankingFromSelection();
   syncSelectionStyles();
+  syncSelectionBadges();
   updateActionButtons();
 }
 
