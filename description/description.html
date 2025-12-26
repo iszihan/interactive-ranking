@@ -106,8 +106,10 @@
 		}
 		.zoom-preview{
 			position: fixed;
-			inset: auto auto;
-			width: min(90vw, 90vh, 1024px);
+			left: 50%;
+			top: 50%;
+			transform: translate(-50%, -50%);
+			width: min(80vw, 80vh, 1024px);
 			border-radius: 18px;
 			background: #fff;
 			box-shadow: 0 32px 90px rgba(10, 12, 32, 0.38);
@@ -195,29 +197,12 @@
 			preview.append(previewImg);
 			document.body.append(preview);
 
-			const OFFSET = 24;
-
-			function updatePosition(evt, fallbackRect){
-				const size = Math.min(window.innerWidth * 0.9, window.innerHeight * 0.9, 1024);
-				const width = preview.offsetWidth || size;
-				const height = preview.offsetHeight || size;
-				const pointerX = evt?.clientX ?? fallbackRect?.right ?? window.innerWidth / 2;
-				const pointerY = evt?.clientY ?? fallbackRect?.top ?? window.innerHeight / 2;
-				let left = pointerX + OFFSET;
-				let top = pointerY + OFFSET;
-				if (left + width > window.innerWidth - 12) left = pointerX - width - OFFSET;
-				if (top + height > window.innerHeight - 12) top = pointerY - height - OFFSET;
-				preview.style.left = `${Math.max(12, left)}px`;
-				preview.style.top = `${Math.max(12, top)}px`;
-			}
-
-			function showPreview(fig, evt){
+			function showPreview(fig){
 				const img = fig.querySelector("img");
 				if (!img) return;
 				previewImg.src = img.currentSrc || img.src;
 				previewImg.alt = img.alt;
 				preview.classList.remove("hidden");
-				requestAnimationFrame(() => updatePosition(evt, fig.getBoundingClientRect()));
 			}
 
 			function hidePreview(){
@@ -226,10 +211,9 @@
 
 			figures.forEach((fig) => {
 				fig.tabIndex = 0;
-				fig.addEventListener("mouseenter", (evt) => showPreview(fig, evt));
-				fig.addEventListener("mousemove", (evt) => updatePosition(evt));
+				fig.addEventListener("mouseenter", () => showPreview(fig));
 				fig.addEventListener("mouseleave", hidePreview);
-				fig.addEventListener("focus", (evt) => showPreview(fig, evt));
+				fig.addEventListener("focus", () => showPreview(fig));
 				fig.addEventListener("blur", hidePreview);
 			});
 		})();

@@ -1034,6 +1034,7 @@ class Engine:
             "indices": [int(x) for x in ranked_indices],
             "selected": self.last_selected_basename,
             "saved_at": time.time(),
+            "ready_at": None,
         })
 
         ctx_new_x = new_x.detach().cpu().tolist()
@@ -1062,6 +1063,11 @@ class Engine:
             await self._generate_with_pool(new_x, new_I, new_y, round_id, iteration, basenames_out=result_basenames)
         else:
             await self._generate_in_process(new_x, new_I, new_y, round_id, iteration, basenames_out=result_basenames)
+        ready_ts = time.time()
+        if self.ranking_history:
+            self.ranking_history[-1]["ready_at"] = ready_ts
+        if self.last_round_context is not None:
+            self.last_round_context["ready_at"] = ready_ts
         new_y_results = list(new_y)
         if self.last_round_context is not None:
             self.last_round_context["new_y"] = [

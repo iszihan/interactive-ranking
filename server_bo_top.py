@@ -974,6 +974,7 @@ class Engine:
                 "new_y": [float(self.Y[i].item()) if self.Y is not None and i < self.Y.shape[0] else None for i in ranked_indices],
                 "selected": getattr(self, "last_selected_basename", None),
                 "saved_at": time.time(),
+                "ready_at": time.time(),
                 "train_version": int(self.train_dataset_version),
             })
 
@@ -1575,6 +1576,7 @@ class Engine:
             "indices": [int(x) for x in ranked_indices],
             "selected": self.last_selected_basename,
             "saved_at": time.time(),
+            "ready_at": None,
             "train_version": int(self.train_dataset_version),
         }
 
@@ -1612,6 +1614,10 @@ class Engine:
             await self._generate_with_pool(new_x, new_I, new_y, round_id, iteration, result_basenames)
         else:
             await self._generate_in_process(new_x, new_I, new_y, round_id, iteration, result_basenames)
+        ready_ts = time.time()
+        ranking_entry["ready_at"] = ready_ts
+        if self.last_round_context is not None:
+            self.last_round_context["ready_at"] = ready_ts
         new_y_results = list(new_y)
         if self.last_round_context is not None:
             self.last_round_context["new_y"] = [

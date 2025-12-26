@@ -447,11 +447,17 @@ class Engine:
         x_vals = payload.get("x")
         if not isinstance(x_vals, list):
             return
+        ready_at = payload.get("ready_at")
+        try:
+            ready_at = float(ready_at) if ready_at is not None else None
+        except (TypeError, ValueError):
+            ready_at = None
         entry = {
             "x": [float(v) for v in x_vals],
             "image": payload.get("image"),
             "similarity": payload.get("similarity"),
             "timestamp": float(payload.get("timestamp") or time.time()),
+            "ready_at": ready_at if ready_at is not None else float(time.time()),
         }
         self.slider_history.insert(0, entry)
         self.get_slider_iteration()
@@ -478,6 +484,7 @@ class Engine:
                 "image": entry.get("image"),
                 "similarity": entry.get("similarity"),
                 "timestamp": entry.get("timestamp"),
+                "ready_at": entry.get("ready_at"),
             })
         return history_payload
 
@@ -762,11 +769,13 @@ class Engine:
 
         print(f'is_safe: {is_safe}')
 
+        ts_now = time.time()
         payload = {
             "x": arr.tolist(),
             "image": out_url,
             "similarity": sim_scalar,
-            "timestamp": time.time(),
+            "timestamp": ts_now,
+            "ready_at": ts_now,
             "is_safe": is_safe,
         }
         if record_history:

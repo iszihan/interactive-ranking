@@ -124,6 +124,12 @@ def export_engine_state(engine: "Engine") -> Dict[str, Any]:
         if isinstance(result_images_snapshot, (list, tuple)):
             result_images_snapshot = [str(x) for x in result_images_snapshot]
 
+        ready_at_val = item.get("ready_at")
+        try:
+            ready_at_val = float(ready_at_val) if ready_at_val is not None else None
+        except (TypeError, ValueError):
+            ready_at_val = None
+
         indices_payload: list[int] = []
         for x in item.get("indices", []) or []:
             val = _safe_int(x, None)
@@ -137,6 +143,7 @@ def export_engine_state(engine: "Engine") -> Dict[str, Any]:
             "indices": indices_payload,
             "selected": item.get("selected"),
             "saved_at": item.get("saved_at"),
+            "ready_at": ready_at_val,
             "train_version": train_version_value,
             "new_y": new_y_snapshot,
             "result_images": result_images_snapshot,
@@ -338,6 +345,11 @@ def export_slider_history(engine: "Engine") -> list[Dict[str, Any]]:
         x_vals = entry.get("x") if isinstance(entry, dict) else None
         if not isinstance(x_vals, list):
             continue
+        ready_at_val = entry.get("ready_at")
+        try:
+            ready_at_val = float(ready_at_val) if ready_at_val is not None else None
+        except (TypeError, ValueError):
+            ready_at_val = None
         record: Dict[str, Any] = {
             "x": [float(v) for v in x_vals],
         }
@@ -353,6 +365,8 @@ def export_slider_history(engine: "Engine") -> list[Dict[str, Any]]:
                 record["timestamp"] = float(entry.get("timestamp"))
             except (TypeError, ValueError):
                 pass
+        if ready_at_val is not None:
+            record["ready_at"] = ready_at_val
         history.append(record)
     return history
 
@@ -363,12 +377,19 @@ def apply_slider_history(engine: "Engine", payload: list[Dict[str, Any]] | None)
         x_vals = entry.get("x") if isinstance(entry, dict) else None
         if not isinstance(x_vals, list):
             continue
+        ready_at_val = entry.get("ready_at")
+        try:
+            ready_at_val = float(ready_at_val) if ready_at_val is not None else None
+        except (TypeError, ValueError):
+            ready_at_val = None
         record: Dict[str, Any] = {
             "x": [float(v) for v in x_vals],
             "image": entry.get("image"),
             "similarity": entry.get("similarity"),
             "timestamp": entry.get("timestamp"),
         }
+        if ready_at_val is not None:
+            record["ready_at"] = ready_at_val
         history.append(record)
     setattr(engine, "slider_history", history)
 
