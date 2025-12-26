@@ -14,7 +14,7 @@ from PIL import Image, ImageDraw
 from io import BytesIO
 from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, Response
 from fastapi import FastAPI, Body
 import torch
 import pytorch_lightning as pl
@@ -108,7 +108,7 @@ DEMO_DIR = OUTPUT_DIR / "demographics"
 DEMO_DIR.mkdir(parents=True, exist_ok=True)
 
 STATE_PATH_OVERRIDE: Path | None = None
-STATE_SAVE_PATH_OVERRIDE: Path | None = None
+STATE_SAVE_DIR_OVERRIDE: Path | None = None
 
 _env_state_override = os.environ.get("ENGINE_STATE_PATH_OVERRIDE")
 if _env_state_override:
@@ -118,31 +118,49 @@ if _env_state_override:
     except Exception as exc:
         print(f"[env] Failed to apply ENGINE_STATE_PATH_OVERRIDE: {exc}")
 
-_env_state_save_override = os.environ.get("ENGINE_STATE_SAVE_PATH_OVERRIDE")
+_env_state_save_override = os.environ.get("ENGINE_STATE_SAVE_DIR_OVERRIDE")
+if not _env_state_save_override:
+    _env_state_save_override = os.environ.get("ENGINE_STATE_SAVE_PATH_OVERRIDE")
+    if _env_state_save_override:
+        print("[env] ENGINE_STATE_SAVE_PATH_OVERRIDE is deprecated; use ENGINE_STATE_SAVE_DIR_OVERRIDE.")
 if _env_state_save_override:
     try:
-        STATE_SAVE_PATH_OVERRIDE = Path(
+        STATE_SAVE_DIR_OVERRIDE = Path(
             _env_state_save_override)
         print(
-            f"[env] Using engine save state path override: {STATE_SAVE_PATH_OVERRIDE}")
+            f"[env] Using engine save state dir override: {STATE_SAVE_DIR_OVERRIDE}")
     except Exception as exc:
         print(
-            f"[env] Failed to apply ENGINE_STATE_SAVE_PATH_OVERRIDE: {exc}")
+            f"[env] Failed to apply ENGINE_STATE_SAVE_DIR_OVERRIDE: {exc}")
 
 app = FastAPI()
 DEMO_ENABLED: bool = False
 DEMO_PARTICIPANT_ID: str | None = None
+PRECOMPUTE_ENABLED: bool = False
 
 # Allow demographics to be set via environment (mirrors state-path handling)
 _env_demo_enabled = os.environ.get("DEMOGRAPHIC_ENABLED")
 _env_demo_participant = os.environ.get("DEMOGRAPHIC_PARTICIPANT_ID")
+_env_precompute_enabled = os.environ.get("PRECOMPUTE_ENABLED")
 if _env_demo_enabled:
     DEMO_ENABLED = str(_env_demo_enabled).lower() in {"1", "true", "yes", "on"}
 if _env_demo_participant:
     DEMO_PARTICIPANT_ID = _env_demo_participant
     DEMO_ENABLED = True
+if _env_precompute_enabled:
+    PRECOMPUTE_ENABLED = str(_env_precompute_enabled).lower() in {"1", "true", "yes", "on"}
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+
+class SafeStaticFiles(StaticFiles):
+    """StaticFiles that returns 404 instead of crashing when a file is missing."""
+
+    async def get_response(self, path: str, scope):  # type: ignore[override]
+        try:
+            return await super().get_response(path, scope)
+        except FileNotFoundError:
+            return Response(status_code=404)
 
 # helpers ------------------------------------------------------------
 
@@ -168,14 +186,27 @@ def ray_box_steps(p, v, low=0.0, high=1.0):
 
 @app.on_event("startup")
 async def _init_engine_once():
-    global engine, STATE_PATH_OVERRIDE, STATE_SAVE_PATH_OVERRIDE
+    global engine, STATE_PATH_OVERRIDE, STATE_SAVE_DIR_OVERRIDE
     if engine is None:
         engine = Engine(
             CONFIG_FILE,
             OUTPUT_DIR,
             state_path=STATE_PATH_OVERRIDE,
-            save_state_path=STATE_SAVE_PATH_OVERRIDE,
+            save_state_dir=STATE_SAVE_DIR_OVERRIDE,
         )
+    eng = engine
+    if eng is None:
+        raise RuntimeError("Engine failed to initialize before precompute.")
+    if PRECOMPUTE_ENABLED:
+        print("[precompute] Starting precompute at startup…")
+        # Gallery Engine.start is async; call directly when coroutine, else thread it.
+        if asyncio.iscoroutinefunction(eng.start):
+            await eng.start()
+        else:
+            await asyncio.to_thread(eng.start)
+        print("[precompute] Precompute complete; exiting.")
+        _shutdown_gpu_pool(save_state=True)
+        os._exit(0)
 
 
 @app.on_event("shutdown")
@@ -201,7 +232,17 @@ def _make_generation(engine, x: np.ndarray):
     sim_val, image_path = engine.f(x)
     # Read image and return bytes
     data = Path(image_path).read_bytes()
-    return data, x, sim_val
+    return data, x, sim_val, str(image_path)
+
+
+def _is_valid_image_bytes(data: bytes) -> bool:
+    try:
+        with Image.open(BytesIO(data)) as img:
+            img.verify()
+        return True
+    except Exception as exc:
+        print(f"[safety] Image bytes failed verification: {exc}")
+        return False
 
 
 def ranking2pairs(ranked_indices):
@@ -224,7 +265,7 @@ class Engine:
     """
 
     def __init__(self, config_path: Path, outputs_dir: Path, *, state_path: Path | None = None,
-                 save_state_path: Path | None = None) -> None:
+                 save_state_dir: Path | None = None) -> None:
         self.outputs_dir = outputs_dir
         print(f"Outputs dir: {self.outputs_dir}")
         self.clear_outputs()
@@ -232,7 +273,7 @@ class Engine:
         self.config_path = Path(config_path).resolve()
         self.config_snapshot: dict | None = None
         self.state_path: Path | None = None
-        self.save_state_path: Path | None = None
+        self.save_state_dir: Path | None = None
         self.autosave_enabled = True
         self.autoload_state = True
         self.state_loaded = False
@@ -263,11 +304,11 @@ class Engine:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
             print(f"Engine state path: {self.state_path}")
 
-        save_path = save_state_path
-        if save_path:
-            self.save_state_path = Path(save_path)
-            self.save_state_path.parent.mkdir(parents=True, exist_ok=True)
-            print(f"Engine save state path: {self.save_state_path}")
+        save_dir = save_state_dir
+        if save_dir:
+            self.save_state_dir = Path(save_dir)
+            self.save_state_dir.mkdir(parents=True, exist_ok=True)
+            print(f"Engine save state dir: {self.save_state_dir}")
 
         self.num_observations = config.get('num_observations', 10)
         self.init_dir = config.get('init_dir', None)
@@ -446,27 +487,28 @@ class Engine:
             "infer_steps": self.infer_steps,
             "infer_width": self.infer_width,
             "infer_height": self.infer_height,
-            "output_dir": str(self.outputs_dir),
+            # "output_dir": str(self.outputs_dir),
+            "output_dir": str(WORKING_DIR),
             "control_img_path": self.control_img_path,
             "weight_idx": 1,
         }
 
-    def save_state(self, reason: str | None = None, path: Path | str | None = None, *, force: bool = False) -> Path | None:
-        target = path or self.save_state_path
-        if target is None:
-            print("No save-state path configured; skipping save.")
+    def save_state(self, reason: str | None = None, save_dir: Path | str | None = None, *, force: bool = False) -> Path | None:
+        target_dir = save_dir or self.save_state_dir
+        if target_dir is None:
+            print("No save-state dir configured; skipping save.")
             return None
-        target = Path(target)
-        if not force and not self.autosave_enabled and self.save_state_path and target == self.save_state_path:
+        target_dir = Path(target_dir)
+        if not force and not self.autosave_enabled and self.save_state_dir and target_dir == self.save_state_dir:
             print("Autosave disabled; skipping save.")
             return None
         try:
-            saved_path = save_engine_state(self, target, reason=reason)
+            saved_path = save_engine_state(self, target_dir, reason=reason)
             print(
                 f"Saved engine state to {saved_path} ({reason or 'unspecified'})")
             return saved_path
         except Exception as exc:
-            print(f"Failed to save engine state to {target}: {exc}")
+            print(f"Failed to save engine state to {target_dir}: {exc}")
             return None
 
     def load_state(self, path: Path | str | None = None, *, reset: bool = False, force: bool = False) -> bool:
@@ -504,15 +546,23 @@ class Engine:
             print(f"Failed to load engine state from {target}: {exc}")
             return False
 
-    def _build_worker_payload(self, x_vector: np.ndarray) -> dict:
+    def _build_worker_payload(self, x_vector: np.ndarray, *, output_dir: str | None = None,
+                               is_init: bool = False) -> dict:
         state = copy.deepcopy(self.worker_state_template or {})
+        if output_dir:
+            state["output_dir"] = output_dir
+        if is_init:
+            state["is_init"] = True
+
+        vector_flat = np.asarray(x_vector).reshape(-1)
         return {
             "state": state,
-            "x": x_vector.tolist(),
-            "w": x_vector.tolist(),
+            "x": vector_flat.tolist(),
+            "w": vector_flat.tolist(),
         }
 
     def _warmup_gpu_pool(self) -> None:
+        return  # --- IGNORE ---
         if not self.gpu_pool or self._pool_warmed:
             return
 
@@ -552,7 +602,7 @@ class Engine:
 
         self._pool_warmed = True
 
-    async def _finalize_slot(self, slot_idx: int, idx: int, data: bytes, x_vector: np.ndarray, round_id: int, iteration: int):
+    async def _finalize_slot(self, slot_idx: int, idx: int, data: bytes, x_vector: np.ndarray, round_id: int, iteration: int, *, image_path: str | None = None):
         out_path = SLOTS_DIR / f"slot-{slot_idx}.png"
         await asyncio.to_thread(out_path.write_bytes, data)
         await self._events.put(("slot", {
@@ -561,8 +611,10 @@ class Engine:
             "iteration": int(iteration),
         }))
         self.x_record[out_path.name] = (x_vector, int(idx))
+        if image_path:
+            self.x_record[out_path.name] = (x_vector, int(idx), str(image_path))
 
-    async def _generate_with_pool(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int):
+    async def _generate_with_pool(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int, *, basenames_out: list[str] | None = None):
         pending: dict[int, tuple[int, int]] = {}
         for i in range(new_x.shape[0]):
             x_trial = new_x[i]
@@ -583,18 +635,50 @@ class Engine:
             if isinstance(data, memoryview):
                 data = data.tobytes()
             x_vec = np.array(result["x"], dtype=np.float64)
-            new_y[slot_idx] = float(result["sim_val"])
-            await self._finalize_slot(slot_idx, idx, data, x_vec, round_id, iteration)
+            image_path = result.get("image_path") if isinstance(result, dict) else None
+            if not _is_valid_image_bytes(data):
+                print(f"[safety] Invalid image bytes for slot {slot_idx}; regenerating once in-process")
+                data, x_vec_regen, y_regen, image_path_regen = await asyncio.to_thread(_make_generation, self, x_vec)
+                if not _is_valid_image_bytes(data):
+                    raise RuntimeError(f"Regenerated image still invalid for slot {slot_idx}")
+                x_vec = np.array(x_vec_regen, dtype=np.float64)
+                new_y[slot_idx] = float(np.asarray(y_regen).flatten()[0])
+                image_path = image_path or image_path_regen
+            else:
+                new_y[slot_idx] = float(result.get("sim_val", new_y[slot_idx]))
+            img_name = None
+            if image_path:
+                try:
+                    img_name = Path(image_path).name
+                except Exception:
+                    img_name = None
+            if basenames_out is not None:
+                basenames_out.append(img_name or f"slot-{slot_idx}.png")
+            await self._finalize_slot(slot_idx, idx, data, x_vec, round_id, iteration, image_path=image_path)
 
-    async def _generate_in_process(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int):
+    async def _generate_in_process(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int, *, basenames_out: list[str] | None = None):
         for i in range(new_x.shape[0]):
             x_trial = new_x[i]
             if isinstance(x_trial, torch.Tensor):
                 x_trial = x_trial.detach().cpu().numpy()
             idx = new_I[i]
-            data, x_vec, y = await asyncio.to_thread(_make_generation, self, x_trial)
+            data, x_vec, y, image_path = await asyncio.to_thread(_make_generation, self, x_trial)
+            if not _is_valid_image_bytes(data):
+                print(f"[safety] Invalid image bytes for slot {i}; regenerating once")
+                data, x_vec_regen, y_regen, image_path_regen = await asyncio.to_thread(_make_generation, self, x_trial)
+                if not _is_valid_image_bytes(data):
+                    raise RuntimeError(f"Regenerated image still invalid for slot {i}")
+                x_vec = x_vec_regen
+                y = y_regen
+                image_path = image_path_regen
             new_y[i] = float(np.asarray(y).flatten()[0])
-            await self._finalize_slot(i, idx, data, x_vec, round_id, iteration)
+            if basenames_out is not None:
+                try:
+                    img_name = Path(image_path).name if image_path else f"slot-{i}.png"
+                except Exception:
+                    img_name = f"slot-{i}.png"
+                basenames_out.append(img_name)
+            await self._finalize_slot(i, idx, data, x_vec, round_id, iteration, image_path=image_path)
 
     async def recall_last_round(self, *, emit_events: bool = False) -> bool:
         ctx = self.last_round_context or {}
@@ -724,8 +808,23 @@ class Engine:
         if not os.path.exists(src_dir / 'preinit'):
             os.makedirs(src_dir / 'preinit', exist_ok=True)
 
-        init_observations, x_record = prepare_init_obs_simplex(self.num_observations, len(
-            self.component_weights), self.f_preinit, seed=self.seed, sparse_threshold=None, sampler=sample_dirichlet_simplex)
+        def _build_init_payload(x_np, _idx):
+            return self._build_worker_payload(
+                x_np,
+                output_dir=str(src_dir / 'preinit'),
+                is_init=True,
+            )
+
+        init_observations, x_record = prepare_init_obs_simplex(
+            self.num_observations,
+            len(self.component_weights),
+            self.f_preinit,
+            seed=self.seed,
+            sparse_threshold=None,
+            sampler=sample_dirichlet_simplex,
+            gpu_pool=self.gpu_pool,
+            payload_builder=_build_init_payload,
+        )
 
         x_observations_score = init_observations[1]
         best_x = init_observations[0][np.argmax(x_observations_score)]
@@ -766,15 +865,41 @@ class Engine:
 
         async def prepare_init_pysps_plane(train_X, f):
             """Prepare initial observations for the optimization."""
-            yy = []
-            round_id = 0
-            for i in range(train_X.shape[0]):
-                sim_val, image_path = f(
-                    train_X[i].reshape(1, -1).detach().cpu().numpy())
-                yy.append(sim_val)
-                data = Path(image_path).read_bytes()
-                await self._finalize_slot(i, i, data, train_X[i].detach().cpu().numpy(), round_id, 0)
-                round_id += 1
+            yy: list[float] = [0.0] * train_X.shape[0]
+
+            if self.gpu_pool:
+                payloads = []
+                for i in range(train_X.shape[0]):
+                    x_np = train_X[i].reshape(1, -1).detach().cpu().numpy()
+                    payloads.append({
+                        "payload": self._build_worker_payload(
+                            x_np,
+                            output_dir=str(src_dir),
+                            is_init=True,
+                        )
+                    })
+
+                results = await asyncio.to_thread(
+                    self.gpu_pool.map, "worker_make_generation", payloads
+                )
+
+                for i, res in enumerate(results):
+                    data = res["data"]
+                    if isinstance(data, memoryview):
+                        data = data.tobytes()
+                    sim_val = float(res["sim_val"])
+                    yy[i] = sim_val
+                    x_vec = np.array(res["x"], dtype=np.float64)
+                    await self._finalize_slot(i, i, data, x_vec, i, 0)
+            else:
+                round_id = 0
+                for i in range(train_X.shape[0]):
+                    sim_val, image_path = f(
+                        train_X[i].reshape(1, -1).detach().cpu().numpy())
+                    yy[i] = sim_val
+                    data = Path(image_path).read_bytes()
+                    await self._finalize_slot(i, i, data, train_X[i].detach().cpu().numpy(), round_id, 0)
+                    round_id += 1
 
             # Build Y from a contiguous numpy array to avoid slow tensor-from-list path.
             y_np = np.asarray(yy, dtype=np.float64).reshape(-1, 1)
@@ -909,6 +1034,7 @@ class Engine:
             "indices": [int(x) for x in ranked_indices],
             "selected": self.last_selected_basename,
             "saved_at": time.time(),
+            "ready_at": None,
         })
 
         ctx_new_x = new_x.detach().cpu().tolist()
@@ -932,10 +1058,16 @@ class Engine:
 
         # Iterate and generate each slot given new_x
         new_y = [0 for _ in range(new_x.shape[0])]
+        result_basenames: list[str] = []
         if self.gpu_pool:
-            await self._generate_with_pool(new_x, new_I, new_y, round_id, iteration)
+            await self._generate_with_pool(new_x, new_I, new_y, round_id, iteration, basenames_out=result_basenames)
         else:
-            await self._generate_in_process(new_x, new_I, new_y, round_id, iteration)
+            await self._generate_in_process(new_x, new_I, new_y, round_id, iteration, basenames_out=result_basenames)
+        ready_ts = time.time()
+        if self.ranking_history:
+            self.ranking_history[-1]["ready_at"] = ready_ts
+        if self.last_round_context is not None:
+            self.last_round_context["ready_at"] = ready_ts
         new_y_results = list(new_y)
         if self.last_round_context is not None:
             self.last_round_context["new_y"] = [
@@ -946,6 +1078,15 @@ class Engine:
         feedback_tensor = torch.tensor(new_y_results, dtype=torch.double,
                                        device=device).reshape(-1, 1)
         self.Y = torch.cat([self.Y, feedback_tensor], dim=0)
+
+        # Debug snapshot: per-step scores and generated image basenames (from WORKING_DIR).
+        if self.ranking_history:
+            try:
+                self.ranking_history[-1]["new_y"] = [float(v) for v in new_y_results]
+                if result_basenames:
+                    self.ranking_history[-1]["result_images"] = result_basenames
+            except Exception as exc:  # pragma: no cover (debug only)
+                print(f"[state] Failed to capture per-step debug info: {exc}")
 
         # Tell clients the round finished
         await self._events.put(("done", {
@@ -968,7 +1109,7 @@ def _require_engine() -> Engine:
 
 app.mount("/static", StaticFiles(directory="gallery"), name="static")
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
-app.mount("/slots", StaticFiles(directory=str(SLOTS_DIR)), name="slots")
+app.mount("/slots", SafeStaticFiles(directory=str(SLOTS_DIR)), name="slots")
 app.mount("/description", StaticFiles(directory=str(DESCRIPTION_DIR)),
           name="description")
 app.mount("/tutorial", StaticFiles(directory=str(TUTORIAL_DIR)), name="tutorial")
@@ -991,9 +1132,36 @@ def health() -> dict:
 @app.get("/api/stage/status")
 async def api_stage_status() -> JSONResponse:
     # Gallery workflow does not use stages; return empty stage state for parity.
+    images = _list_image_urls()
+
+    eng = engine
+    ctx = getattr(eng, "last_round_context", {}) if eng else {}
+
+    expected: int | None = None
+    round_id: int | None = None
+    iteration: int | None = None
+
+    if isinstance(ctx, dict):
+        round_id = ctx.get("round") if isinstance(ctx.get("round"), int) else None
+        iter_candidate = ctx.get("iteration", ctx.get("step"))
+        if isinstance(iter_candidate, int):
+            iteration = iter_candidate
+        n_ctx = ctx.get("n")
+        if isinstance(n_ctx, int):
+            expected = n_ctx
+
+    if expected is None:
+        expected = len(images)
+
+    inflight = bool(expected is not None and len(images) < expected)
+
     return JSONResponse({
         "stage": None,
-        "images": _list_image_urls(),
+        "images": images,
+        "expected": int(expected) if expected is not None else None,
+        "inflight": inflight,
+        "round": int(round_id) if round_id is not None else None,
+        "iteration": int(iteration) if iteration is not None else None,
     })
 
 
@@ -1001,14 +1169,14 @@ async def api_stage_status() -> JSONResponse:
 def api_save_state(payload: dict | None = Body(default=None)) -> JSONResponse:
     eng = _require_engine()
     data = payload or {}
-    path = data.get("path")
+    save_dir = data.get("dir") or data.get("path")
     reason = data.get("reason") or "api"
     force = bool(data.get("force", False))
-    saved_path = eng.save_state(reason=reason, path=path, force=force)
+    saved_path = eng.save_state(reason=reason, save_dir=save_dir, force=force)
     if not saved_path:
         return JSONResponse({
             "saved": False,
-            "path": str(path) if path else None,
+            "path": str(save_dir) if save_dir else None,
         }, status_code=400)
     return JSONResponse({"saved": True, "path": str(saved_path)})
 
@@ -1136,7 +1304,7 @@ async def start() -> JSONResponse:
     iteration = int(getattr(eng, "step", 0))
 
     MIN_COUNT = 1          # how many images make a “batch”
-    WAIT_TIMEOUT = 120.0
+    WAIT_TIMEOUT = 600.0
     deadline = time.monotonic() + WAIT_TIMEOUT
     while time.monotonic() < deadline:
         images = _list_image_urls()
@@ -1321,12 +1489,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Interactive ranking server")
     parser.add_argument("--state-path", dest="state_path", type=str,
                         help="Override path used to load engine state")
-    parser.add_argument("--save-state-path", dest="save_state_path", type=str,
-                        help="Override path used when saving engine state")
+    parser.add_argument("--save-state-dir", dest="save_state_dir", type=str,
+                        help="Directory used when saving engine state (timestamped file names)")
+    parser.add_argument("--save-state-path", dest="save_state_dir", type=str,
+                        help="[Deprecated] Alias for --save-state-dir")
     parser.add_argument("--demographic", dest="demographic", type=str,
                         help="Participant ID to enable demographic collection")
     parser.add_argument("--config", dest="config_path", type=str,
                         help="Path to config file override")
+    parser.add_argument("--precompute", action="store_true",
+                        help="Enable precompute mode (also via PRECOMPUTE_ENABLED env)")
     parser.add_argument("--port", dest="port", type=int, default=8000,
                         help="Port to bind the server (default: 8000)")
     parser.add_argument("--ssh", action="store_true",
@@ -1338,12 +1510,14 @@ if __name__ == "__main__":
         os.environ["ENGINE_STATE_PATH_OVERRIDE"] = str(STATE_PATH_OVERRIDE)
         print(f"[cli] Using engine state path override: {STATE_PATH_OVERRIDE}")
 
-    if args.save_state_path:
-        STATE_SAVE_PATH_OVERRIDE = Path(args.save_state_path).expanduser()
+    if args.save_state_dir:
+        STATE_SAVE_DIR_OVERRIDE = Path(args.save_state_dir).expanduser()
+        os.environ["ENGINE_STATE_SAVE_DIR_OVERRIDE"] = str(
+            STATE_SAVE_DIR_OVERRIDE)
         os.environ["ENGINE_STATE_SAVE_PATH_OVERRIDE"] = str(
-            STATE_SAVE_PATH_OVERRIDE)
+            STATE_SAVE_DIR_OVERRIDE)
         print(
-            f"[cli] Using engine save state path override: {STATE_SAVE_PATH_OVERRIDE}")
+            f"[cli] Using engine save state dir override: {STATE_SAVE_DIR_OVERRIDE}")
 
     if args.demographic:
         DEMO_ENABLED = True
@@ -1357,6 +1531,11 @@ if __name__ == "__main__":
         os.environ["CONFIG_PATH_OVERRIDE"] = str(config_override)
         CONFIG_FILE = config_override.resolve()
         print(f"[cli] Using config override: {CONFIG_FILE}")
+
+    if args.precompute:
+        PRECOMPUTE_ENABLED = True
+        os.environ["PRECOMPUTE_ENABLED"] = "1"
+        print("[cli] Precompute enabled")
 
     _register_shutdown_handlers()
     host = "127.0.0.1" if not args.ssh else "0.0.0.0"

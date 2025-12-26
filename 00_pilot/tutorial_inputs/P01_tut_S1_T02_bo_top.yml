@@ -1,7 +1,7 @@
 gpu_ids: 0,1,2,3
 output_dir: /nfs/artemis.dgpsrv/ondemand29/chenxil/code/interactive-ranking/00_pilot/P01_tut/S1_T02
 num_observations: 5
-num_observations_per_step: 3
+num_observations_per_step: 5
 sample_past_n: 2
 top_k: 5
 max_num_observations: 20
@@ -15,7 +15,7 @@ negative_prompt: easynegative, 3d, realistic, badhandv4, (lowres,  bad quality),
   torso,  mutated limbs
 infer_width: 1024
 infer_height: 1024
-infer_steps: 20
+infer_steps: 30
 alpha_config: /scratch/ondemand29/chenxil/code/mood-board/search_benchmark/ld_experiments_1007/alpha_p1.yml
 example_path: /scratch/ondemand29/chenxil/data/civitai_sdxl_loras/
 stage_iterations:

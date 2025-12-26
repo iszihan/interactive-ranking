@@ -105,7 +105,8 @@ body.no-scroll{
 }
 
 .description-button,
-.tutorial-button{
+.tutorial-button,
+.refresh-button{
   position: fixed;
   right: 32px;
   appearance: none;
@@ -123,19 +124,27 @@ body.no-scroll{
   transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.2s ease;
 }
 
-.tutorial-button{ bottom: 32px; }
-.description-button{ bottom: 88px; }
+.description-button{ bottom: 148px; }
+.tutorial-button{ bottom: 92px; }
+.refresh-button{
+  bottom: 24px;
+  background: linear-gradient(135deg, #ffd85a, #f5a623);
+  box-shadow: 0 12px 30px rgba(248, 180, 56, 0.35);
+  color: #2d2005;
+}
 
 .description-button:hover,
-.tutorial-button:hover{
+.tutorial-button:hover,
+.refresh-button:hover{
   transform: translateY(-2px);
   box-shadow: 0 16px 34px rgba(47, 75, 191, 0.4);
 }
 
 .description-button:active,
-.tutorial-button:active{
+.tutorial-button:active,
+.refresh-button:active{
   transform: translateY(1px);
-  box-shadow: 0 8px 24px rgba(47, 75, 191, 0.3);
+  box-shadow: 0 8px 24px rgba(248, 180, 56, 0.3);
 }
 
 .description-overlay{
@@ -258,23 +267,19 @@ body.no-scroll{
 .rank-labels{
   width: min(95vw, 1100px);
   display: flex;
-  justify-content: space-between;
-  margin: 0 auto 5px;
-  font-size: 0.9rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: #666;
+  justify-content: center;
+  margin: 0 auto 10px;
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #3a3a3a;
   padding: 0 12px;
+  text-transform: none;
 }
 
-.rank-label{
-  white-space: nowrap;
-}
-
-.rank-label-left{ color: #009E73; }
-.rank-label-right{ color: #D55E00; }
-.rank-label-mid{ color: #444; text-transform: none; letter-spacing: 0.05em; }
+.rank-direction{ white-space: nowrap; text-align: center; }
+.rank-direction .rank-word-left{ color: #009E73; }
+.rank-direction .rank-word-right{ color: #D55E00; }
 
 
 .reference-brick img,
@@ -315,10 +320,27 @@ body.no-scroll{
   flex-wrap: nowrap;
   gap: 12px;
   overflow-x: auto;
-  padding: 8px 12px;
+  overflow-y: visible;
+  padding: 36px 12px 40px;
   max-width: 100%;
   align-items: flex-start;
   flex: 1 1 auto;
+}
+
+#container .rank-number-badge{
+  position: absolute;
+  left: 50%;
+  bottom: -34px;
+  transform: translateX(-50%);
+  background: #111827;
+  color: #fff;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: 0.95rem;
+  letter-spacing: 0.06em;
+  box-shadow: 0 12px 30px rgba(0,0,0,0.18);
+  pointer-events: none;
 }
 
 
@@ -338,6 +360,25 @@ body.no-scroll{
   cursor: grab;
   transition: transform .2s ease;
 }
+
+.extreme-pill{
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translate(-50%, -115%);
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: 1px solid rgba(0,0,0,0.07);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+  white-space: nowrap;
+}
+
+.extreme-pill.left{ background: #e8f6ed; color: #0c7d50; border-color: #c6e7d5; }
+.extreme-pill.right{ background: #fff2e7; color: #c24c00; border-color: #f3cfb1; }
 
 .brick.selected{}
 
@@ -369,24 +410,24 @@ body.no-scroll{
 .loading-wrap{ display: grid; justify-items: center; row-gap: .5rem; text-align: center; }
 
 .brick.nsfw-flagged img{
-  filter: blur(2px) saturate(0.78);
-  transform: scale(1.015);
+  filter: blur(18px) saturate(0.6);
+  transform: scale(1.04);
   transition: filter 0.2s ease, transform 0.2s ease;
 }
 .brick.nsfw-pending img{
-  filter: blur(10px) saturate(0.78);
-  transform: scale(1.015);
-  transition: filter 0.2s ease, transform 0.2s ease;
+  filter: blur(14px) saturate(0.7);
+  transform: scale(1.03);
+  transition: filter 0.2s ease, tran1sform 0.2s ease;
 }
 
 .zoom-brick.nsfw-flagged img{
-  filter: blur(2px) saturate(0.78);
-  transform: scale(1.015);
+  filter: blur(18px) saturate(0.6);
+  transform: scale(1.04);
   transition: filter 0.2s ease, transform 0.2s ease;
 }
 .zoom-brick.nsfw-pending img{
-  filter: blur(10px) saturate(0.78);
-  transform: scale(1.015);
+  filter: blur(14px) saturate(0.7);
+  transform: scale(1.03);
   transition: filter 0.2s ease, transform 0.2s ease;
 }
 
@@ -394,9 +435,9 @@ body.no-scroll{
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  background: rgba(8, 11, 27, 0.55);
-  backdrop-filter: blur(8px);
-  box-shadow: inset 0 0 32px rgba(0, 0, 0, 0.45);
+  background: rgba(8, 11, 27, 0.68);
+  backdrop-filter: blur(14px);
+  box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.5);
   color: #fff;
   font-size: 0.78rem;
   font-weight: 600;
@@ -409,6 +450,34 @@ body.no-scroll{
   padding: 0 14px;
   pointer-events: none;
   z-index: 2;
+}
+
+/* Centered hover zoom preview */
+.hover-zoom-overlay{
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(80vw, 80vh, 1024px);
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 32px 90px rgba(10, 12, 32, 0.38);
+  padding: 16px;
+  z-index: 3000;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+.hover-zoom-overlay.hidden{
+  opacity: 0;
+  visibility: hidden;
+}
+.hover-zoom-overlay img{
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: min(80vh, 1024px);
+  border-radius: 12px;
+  object-fit: contain;
 }
 
 /* ---------- demographics form ---------- */
@@ -557,6 +626,21 @@ body.no-scroll{
   aspect-ratio: 1 / 1;
   box-shadow: 0 2px 8px rgba(0,0,0,0.05);
   cursor: pointer;
+}
+
+.grid-container .selection-rank-badge{
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  padding: 3px 7px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(245,124,0,0.9), rgba(242,161,11,0.9));
+  color: #fff;
+  font-weight: 700;
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  box-shadow: 0 6px 12px rgba(245,124,0,0.3);
+  pointer-events: none;
 }
 
 .grid-container .brick.selected{

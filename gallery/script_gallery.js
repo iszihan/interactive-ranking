@@ -8,7 +8,6 @@ const nextBtn = document.getElementById("nextBtn");
 const nextWrap = document.getElementById("nextWrap");
 const stageBtn = document.getElementById("stageBtn");
 const rankSection = document.getElementById("rankSection");
-const rankMidLabel = document.getElementById("rankMidLabel");
 const controls = document.getElementById("controls");
 const referenceSection = document.getElementById("referenceSection");
 const referenceImg = document.getElementById("referenceImg");
@@ -16,15 +15,13 @@ const zoomSection = document.getElementById("zoomSection");
 const zoomImg = document.getElementById("zoomImg");
 const zoomBrick = document.querySelector(".zoom-brick");
 const zoomSafetyOverlay = document.getElementById("zoomSafetyOverlay");
-const gridLabel = document.getElementById("gridLabel");
-const gridSection = document.getElementById("gridSection");
-const gridContainer = document.getElementById("gridContainer");
 const descriptionToggle = document.getElementById("descriptionToggle");
 const descriptionOverlay = document.getElementById("descriptionOverlay");
 const descriptionClose = document.getElementById("descriptionClose");
 const tutorialToggle = document.getElementById("tutorialToggle");
 const tutorialOverlay = document.getElementById("tutorialOverlay");
 const tutorialClose = document.getElementById("tutorialClose");
+const refreshUiBtn = document.getElementById("refreshUiBtn");
 const demoOverlay = document.getElementById("demoOverlay");
 const demoClose = document.getElementById("demoClose");
 const demoForm = document.getElementById("demoForm");
@@ -43,31 +40,62 @@ const defaultStageState = {
 };
 let stageState = { ...defaultStageState };
 let isGenerationInFlight = false;
-let demographicsSubmitted = false;
+let selectedBrick = null;
+const safetyIndex = new Map();
+let safetyRefreshPromise = null;
+let safetyRefreshQueued = false;
+const SLOTS_BASE = "/slots"; // make sure this matches server
 let demographicsEnabled = false;
 let demographicsParticipantId = null;
+let demographicsSubmitted = false;
 let demographicsConfigLoaded = false;
-let topK = null;
-let candidates = [];
-let selectedOrder = [];
-let zoomedBrick = null;
 
-// Keep the grid label in sync with the current topK value (or fall back).
-function updateGridLabel() {
-  if (!gridLabel) return;
-  const label = topK && topK > 0
-    ? `All images (right-click to select the top ${topK})`
-    : "All images (right-click to select)";
-  gridLabel.textContent = label;
+function createCenterHoverZoom({ allowShow } = {}) {
+  const overlay = document.createElement("div");
+  overlay.className = "hover-zoom-overlay hidden";
+  const overlayImg = document.createElement("img");
+  overlay.append(overlayImg);
+  document.body.append(overlay);
+
+  const show = (imgEl) => {
+    if (!imgEl) return;
+    if (typeof allowShow === "function" && !allowShow(imgEl)) {
+      hide();
+      return;
+    }
+    const src = imgEl.currentSrc || imgEl.src;
+    if (!src) return;
+    overlayImg.src = src;
+    overlayImg.alt = imgEl.alt || "";
+    overlay.classList.remove("hidden");
+  };
+
+  const hide = () => overlay.classList.add("hidden");
+
+  const attach = (imgEl) => {
+    if (!imgEl) return;
+    imgEl.addEventListener("mouseenter", () => show(imgEl));
+    imgEl.addEventListener("mouseleave", hide);
+    imgEl.addEventListener("focus", () => show(imgEl));
+    imgEl.addEventListener("blur", hide);
+  };
+
+  return { attach, hide };
 }
 
-// Allow a query param ?top_k= to set the initial label immediately (useful when
-// the API response arrives later or is cached).
-const initialTopKParam = Number(new URLSearchParams(window.location.search).get("top_k"));
-if (Number.isFinite(initialTopKParam) && initialTopKParam > 0) {
-  topK = Math.floor(initialTopKParam);
+function isHoverZoomAllowed(imgEl) {
+  if (!imgEl) return false;
+  const unsafeAncestor = imgEl.closest(".nsfw-flagged, .nsfw-pending");
+  if (unsafeAncestor) return false;
+  const canonical = canonicalizeImageSrc(imgEl.dataset?.src || imgEl.currentSrc || imgEl.src);
+  if (!canonical) return true;
+  const state = safetyIndex.has(canonical) ? safetyIndex.get(canonical) : null;
+  return state !== false;
 }
-updateGridLabel();
+
+const hoverZoom = createCenterHoverZoom({ allowShow: isHoverZoomAllowed });
+hoverZoom.attach(referenceImg);
+hoverZoom.attach(zoomImg);
 
 function setBodyScrollLock(locked) {
   document.body.classList.toggle("no-scroll", Boolean(locked));
@@ -82,7 +110,7 @@ function openDescriptionOverlay() {
 function closeDescriptionOverlay() {
   if (!descriptionOverlay) return;
   descriptionOverlay.classList.add("hidden");
-  if (( !tutorialOverlay || tutorialOverlay.classList.contains("hidden")) && (!demoOverlay || demoOverlay.classList.contains("hidden"))) {
+  if ((!tutorialOverlay || tutorialOverlay.classList.contains("hidden")) && (!demoOverlay || demoOverlay.classList.contains("hidden"))) {
     setBodyScrollLock(false);
   }
 }
@@ -96,7 +124,7 @@ function openTutorialOverlay() {
 function closeTutorialOverlay() {
   if (!tutorialOverlay) return;
   tutorialOverlay.classList.add("hidden");
-  if (( !descriptionOverlay || descriptionOverlay.classList.contains("hidden")) && (!demoOverlay || demoOverlay.classList.contains("hidden"))) {
+  if ((!descriptionOverlay || descriptionOverlay.classList.contains("hidden")) && (!demoOverlay || demoOverlay.classList.contains("hidden"))) {
     setBodyScrollLock(false);
   }
 }
@@ -133,6 +161,7 @@ if (descriptionOverlay) {
     }
   });
 }
+
 if (tutorialToggle) {
   tutorialToggle.addEventListener("click", openTutorialOverlay);
 }
@@ -156,33 +185,20 @@ if (demoOverlay) {
     }
   });
 }
+
 document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape") return;
-  if (descriptionOverlay && !descriptionOverlay.classList.contains("hidden")) {
-    closeDescriptionOverlay();
-  }
-  if (tutorialOverlay && !tutorialOverlay.classList.contains("hidden")) {
-    closeTutorialOverlay();
-  }
-  if (demoOverlay && !demoOverlay.classList.contains("hidden")) {
-    closeDemoOverlay();
+  if (event.key === "Escape") {
+    if (descriptionOverlay && !descriptionOverlay.classList.contains("hidden")) {
+      closeDescriptionOverlay();
+    }
+    if (tutorialOverlay && !tutorialOverlay.classList.contains("hidden")) {
+      closeTutorialOverlay();
+    }
+    if (demoOverlay && !demoOverlay.classList.contains("hidden")) {
+      closeDemoOverlay();
+    }
   }
 });
-
-if (gridContainer) {
-  gridContainer.addEventListener("contextmenu", (event) => {
-    const brick = event.target.closest(".brick");
-    if (!brick) return;
-    event.preventDefault();
-    toggleSelection(brick.dataset?.canonical || brick.dataset?.src);
-  });
-
-  gridContainer.addEventListener("click", (event) => {
-    const brick = event.target.closest(".brick");
-    if (!brick) return;
-    setZoomByCanonical(brick.dataset?.canonical || brick.dataset?.src);
-  });
-}
 
 async function loadDemographicsConfig(force = false) {
   if (demographicsConfigLoaded && !force) return { enabled: demographicsEnabled, participant_id: demographicsParticipantId };
@@ -192,14 +208,32 @@ async function loadDemographicsConfig(force = false) {
     const data = await resp.json();
     demographicsEnabled = Boolean(data.enabled);
     demographicsParticipantId = data.participant_id || null;
+    demographicsConfigLoaded = true;
   } catch (err) {
     demographicsEnabled = false;
     demographicsParticipantId = null;
-  } finally {
-    demographicsConfigLoaded = true;
+    demographicsConfigLoaded = false; // allow retry on failure
   }
   return { enabled: demographicsEnabled, participant_id: demographicsParticipantId };
 }
+
+// Preload demographics config so the first Start click has data
+loadDemographicsConfig().catch(() => {
+  demographicsConfigLoaded = false;
+});
+
+async function autoOpenDemographicsIfEnabled() {
+  try {
+    const cfg = await loadDemographicsConfig();
+    if (cfg && cfg.enabled && !demographicsSubmitted && demoOverlay && demoForm) {
+      openDemoOverlay();
+    }
+  } catch (err) {
+    // best-effort; ignore errors to avoid blocking the app load
+  }
+}
+
+autoOpenDemographicsIfEnabled();
 
 function normalizeStagePayload(stage) {
   if (!stage || typeof stage !== "object") {
@@ -236,19 +270,21 @@ function applyStagePayload(stage) {
 
 function updateActionButtons() {
   const stageReady = stageState.hasStages && stageState.nextStageReady;
-  const selectionRequired = topK && topK > 0;
-  const selectionOk = !selectionRequired || selectedOrder.length >= topK;
   if (nextBtn) {
-    nextBtn.disabled = Boolean(isGenerationInFlight || stageReady || !selectionOk);
-    nextBtn.classList.toggle("hidden", stageReady);
+    const hasSelection = Boolean(selectedBrick);
+    nextBtn.disabled = Boolean(isGenerationInFlight || stageReady || !hasSelection);
   }
   if (stageBtn) {
     const shouldShow = stageReady;
     stageBtn.classList.toggle("hidden", !shouldShow);
     stageBtn.disabled = Boolean(isGenerationInFlight);
     if (shouldShow) {
-      // Keep the label user-facing as "Next" so stage transitions feel seamless.
-      stageBtn.textContent = "Next";
+      const labelNumber = Number.isFinite(stageState.nextStageNumber)
+        ? stageState.nextStageNumber
+        : stageState.currentStage + 1;
+      stageBtn.textContent = Number.isFinite(labelNumber)
+        ? `Start Stage ${labelNumber}`
+        : "Start Next Stage";
     }
   }
 }
@@ -261,18 +297,7 @@ if (rankSection) rankSection.classList.add("hidden");
 if (referenceSection) referenceSection.classList.add("hidden");
 if (iterationIndicator) iterationIndicator.classList.add("hidden");
 
-// ---------- drag-to-reorder ----------
-let draggingElem = null;
-let startX = 0;
-let startIndex = 0;
-let currentIndex = 0;
-let lastInteractionWasDrag = false;
-const DRAG_THRESHOLD_PX = 5;
-
-const SLOTS_BASE = "/slots"; // make sure this matches server
-const safetyIndex = new Map();
-let safetyRefreshPromise = null;
-let safetyRefreshQueued = false;
+// ---------- selection (no drag ranking) ----------
 
 function setIterationDisplay(value, { commit = true } = {}) {
   if (!iterationIndicator) return;
@@ -289,6 +314,19 @@ function setIterationDisplay(value, { commit = true } = {}) {
   if (commit) currentIteration = numeric;
   iterationIndicator.textContent = `Iteration ${numeric+1}`;
   iterationIndicator.classList.remove("hidden");
+}
+
+function updateReferenceImage(src) {
+  if (!referenceSection || !referenceImg) return;
+  if (!src) {
+    referenceImg.removeAttribute("src");
+    referenceSection.classList.add("hidden");
+    return;
+  }
+  const canonical = src.split("?")[0];
+  referenceImg.dataset.src = canonical;
+  referenceImg.src = `${canonical}?v=${Date.now()}`;
+  referenceSection.classList.remove("hidden");
 }
 
 function canonicalizeImageSrc(src) {
@@ -396,10 +434,8 @@ function applySafetyOverlay(brick, isSafe = true) {
 }
 
 function syncSafetyOverlays() {
-  const bricks = [];
-  if (container) bricks.push(...container.querySelectorAll(".brick"));
-  if (gridContainer) bricks.push(...gridContainer.querySelectorAll(".brick"));
-  bricks.forEach((brick) => {
+  if (!container) return;
+  container.querySelectorAll(".brick").forEach((brick) => {
     const img = brick.querySelector("img");
     if (!img) return;
     const canonical = img.dataset?.src;
@@ -464,174 +500,28 @@ async function refreshSafetyFromServer() {
   return currentPromise;
 }
 
-function updateReferenceImage(src) {
-  if (!referenceSection || !referenceImg) return;
-  if (!src) {
-    referenceImg.removeAttribute("src");
-    referenceSection.classList.add("hidden");
-    return;
-  }
-  const canonical = src.split("?")[0];
-  referenceImg.dataset.src = canonical;
-  referenceImg.src = `${canonical}?v=${Date.now()}`;
-  referenceSection.classList.remove("hidden");
-}
-
-function getSelectionLimit() {
-  return topK && topK > 0 ? Math.min(topK, candidates.length) : candidates.length;
-}
-
-function setTopKValue(value) {
-  const numeric = Number(value);
-  topK = Number.isFinite(numeric) && numeric > 0 ? Math.floor(numeric) : null;
-  clampSelectionToLimit();
-  updateRankMidLabel();
-  updateGridLabel();
-  updateActionButtons();
-}
-
-function updateRankMidLabel() {
-  if (!rankMidLabel) return;
-  rankMidLabel.textContent = topK && topK > 0 ? `Rank top ${topK}` : "Rank";
-}
-
-function syncSelectedOrderToCandidates() {
-  const validCanonicals = new Set((candidates || []).map((c) => c.canonical));
-  selectedOrder = selectedOrder.filter((c) => validCanonicals.has(c));
-}
-
-function clampSelectionToLimit() {
-  syncSelectedOrderToCandidates();
-  const limit = getSelectionLimit();
-  if (limit < 0) return;
-  selectedOrder = selectedOrder.slice(0, limit);
-}
-
-function resetSelectionToCandidateOrder() {
-  // Do not auto-select; start each round with an empty selection.
-  selectedOrder = [];
-}
-
-function getCandidateByCanonical(canonical) {
-  return (candidates || []).find((c) => c.canonical === canonical);
-}
-
-function getCandidateBySlot(slot) {
-  return (candidates || []).find((c) => Number(c.slot) === Number(slot));
-}
-
 function indexOfElement(el) { return [...container.children].indexOf(el); }
 function getClientX(e) { return e.touches ? e.touches[0].clientX : e.clientX; }
 
-function onMouseDown(e) {
+function onBrickClick(e) {
   const brick = e.target.closest(".brick");
   if (!brick) return;
-  e.preventDefault();
-  lastInteractionWasDrag = false;
-
-  draggingElem = brick;
-  startX = getClientX(e);
-  startIndex = indexOfElement(draggingElem);
-  currentIndex = startIndex;
-
-  draggingElem.classList.add("dragging");
-  document.addEventListener("mousemove", onMouseMove);
-  document.addEventListener("mouseup", onMouseUp);
-  document.addEventListener("touchmove", onMouseMove, { passive: false });
-  document.addEventListener("touchend", onMouseUp);
+  showZoomForBrick(brick);
 }
-container.addEventListener("mousedown", onMouseDown);
-container.addEventListener("touchstart", onMouseDown, { passive: false });
-
-function onMouseMove(e) {
-  e.preventDefault();
-  if (!draggingElem) return;
-
-  const deltaX = getClientX(e) - startX;
-  if (!lastInteractionWasDrag && Math.abs(deltaX) > DRAG_THRESHOLD_PX) {
-    lastInteractionWasDrag = true;
-  }
-  draggingElem.style.transform = `translateX(${deltaX}px)`;
-
-  const all = [...container.children];
-  const others = all.filter(el => el !== draggingElem);
-
-  function middle(el) { const r = el.getBoundingClientRect(); return r.left + r.width / 2; }
-  const midX = middle(draggingElem);
-
-  let newIndex = others.findIndex(other => midX < middle(other));
-  if (newIndex === -1) newIndex = others.length;
-
-  if (newIndex !== currentIndex) {
-    currentIndex = newIndex;
-    reorderGhosts();
-  }
-}
-
-function reorderGhosts() {
-  const bricks = [...container.children].filter(el => el !== draggingElem);
-  const spacing = draggingElem.getBoundingClientRect().width;
-  const cs = getComputedStyle(container);
-  const gap = parseFloat(cs.columnGap || cs.getPropertyValue?.("column-gap") || cs.gap || "0") || 0;
-  const offset = spacing + gap;
-
-  bricks.forEach((b, i) => {
-    b.style.transform = "";
-    if (startIndex < currentIndex && i >= startIndex && i < currentIndex) {
-      b.style.transform = `translateX(-${offset}px)`;
-    } else if (startIndex > currentIndex && i >= currentIndex && i < startIndex) {
-      b.style.transform = `translateX(${offset}px)`;
-    }
-  });
-}
-
-function onMouseUp() {
-  if (!draggingElem) return;
-
-  const droppedBrick = draggingElem;
-  const wasDrag = lastInteractionWasDrag;
-  const bricks = [...container.children].filter(el => el !== draggingElem);
-  bricks.forEach(b => { b.style.transform = ""; b.classList.add("resetting"); });
-
-  draggingElem.style.transform = "";
-  draggingElem.classList.remove("dragging");
-
-  const referenceNode = bricks[currentIndex] ?? null;
-  container.insertBefore(draggingElem, referenceNode);
-
-  draggingElem = null;
-  document.removeEventListener("mousemove", onMouseMove);
-  document.removeEventListener("mouseup", onMouseUp);
-  document.removeEventListener("touchmove", onMouseMove);
-  document.removeEventListener("touchend", onMouseUp);
-
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      bricks.forEach(b => b.classList.remove("resetting"));
-    });
-  });
-
-  selectedOrder = [...container.querySelectorAll(".brick img")]
-    .map((img) => img.dataset?.src || img.src)
-    .filter(Boolean);
-  syncSelectionStyles();
-
-  if (!wasDrag) {
-    showZoomForBrick(droppedBrick);
-  }
-
-  lastInteractionWasDrag = false;
+if (container) {
+  container.addEventListener("click", onBrickClick);
 }
 
 function clearZoomSelection() {
-  if (zoomedBrick) zoomedBrick.classList.remove("zoomed");
-  zoomedBrick = null;
+  if (selectedBrick) selectedBrick.classList.remove("selected");
+  selectedBrick = null;
   if (zoomImg) {
     zoomImg.removeAttribute("src");
     zoomImg.removeAttribute("data-src");
   }
   if (zoomSection) zoomSection.classList.add("hidden");
   updateZoomSafety(null);
+  updateActionButtons();
 }
 
 function showZoomForBrick(brick) {
@@ -639,11 +529,11 @@ function showZoomForBrick(brick) {
   const img = brick.querySelector("img");
   if (!img || !img.src) return;
 
-  if (zoomedBrick && zoomedBrick !== brick) {
-    zoomedBrick.classList.remove("zoomed");
+  if (selectedBrick && selectedBrick !== brick) {
+    selectedBrick.classList.remove("selected");
   }
-  zoomedBrick = brick;
-  zoomedBrick.classList.add("zoomed");
+  selectedBrick = brick;
+  selectedBrick.classList.add("selected");
 
   const canonical = (img.dataset && img.dataset.src) ? img.dataset.src : img.src;
   const zoomSrc = img.currentSrc || img.src;
@@ -651,174 +541,16 @@ function showZoomForBrick(brick) {
   zoomImg.dataset.src = canonical;
   zoomSection.classList.remove("hidden");
   updateZoomSafety(canonical);
+  updateActionButtons();
 }
 
-// selection happens on mouse/touch release (see onMouseUp)
+// selection happens on click
 
 // ---------- layout helpers ----------
 function setTilesPerRow(N) {
   // choose a reasonable vw per tile so N tiles are visible-ish; clamp 8–18vw
   const basis = Math.max(8, Math.min(18, Math.floor(80 / Math.max(1, N))));
   document.documentElement.style.setProperty("--tile-ideal", `${basis}vw`);
-}
-
-function renderGrid({ showLoading = false } = {}) {
-  if (!gridContainer) return;
-  gridContainer.innerHTML = "";
-  const list = Array.isArray(candidates) ? candidates : [];
-
-  for (let idx = 0; idx < list.length; idx++) {
-    const entry = list[idx];
-    const brick = document.createElement("div");
-    brick.className = "brick";
-    brick.dataset.slot = entry.slot ?? idx;
-    brick.dataset.canonical = entry.canonical;
-    brick.title = "Right-click to select/deselect";
-
-    const img = document.createElement("img");
-    img.alt = "";
-    img.dataset.basename = entry.basename || entry.canonical.split("/").pop();
-    img.dataset.src = entry.canonical;
-    img.src = `${entry.canonical}?v=${Date.now()}`;
-    brick.appendChild(img);
-
-    if (showLoading || !entry.loaded) {
-      const overlay = document.createElement("div");
-      overlay.className = "loading";
-      overlay.innerHTML = `<div class="loading-wrap"><div class="spinner"></div><div class="label">Generating…</div></div>`;
-      brick.appendChild(overlay);
-    }
-
-    let safetyState = entry.isSafe;
-    if (safetyState === undefined || safetyState === null) {
-      safetyState = safetyIndex.has(entry.canonical) ? safetyIndex.get(entry.canonical) : null;
-    }
-    rememberImageSafety(entry.canonical, safetyState);
-    applySafetyOverlay(brick, safetyState);
-    if (selectedOrder.includes(entry.canonical)) {
-      brick.classList.add("selected");
-    }
-
-    gridContainer.appendChild(brick);
-  }
-
-  if (gridSection) {
-    gridSection.classList.toggle("hidden", !list.length);
-  }
-}
-
-function renderRankingFromSelection({ showLoading = false } = {}) {
-  if (!container) return 0;
-  container.innerHTML = "";
-  const canonicalSet = new Set((candidates || []).map((c) => c.canonical));
-  selectedOrder = selectedOrder.filter((c) => canonicalSet.has(c));
-  clampSelectionToLimit();
-
-  let rendered = 0;
-  for (const canonical of selectedOrder) {
-    const entry = getCandidateByCanonical(canonical);
-    if (!entry) continue;
-
-    const brick = document.createElement("div");
-    brick.className = "brick";
-    brick.dataset.canonical = entry.canonical;
-    brick.dataset.slot = entry.slot ?? rendered;
-
-    const img = document.createElement("img");
-    img.alt = "";
-    img.dataset.basename = entry.basename || entry.canonical.split("/").pop();
-    img.dataset.src = entry.canonical;
-    img.src = `${entry.canonical}?v=${Date.now()}`;
-    brick.appendChild(img);
-
-    if (showLoading || !entry.loaded) {
-      const overlay = document.createElement("div");
-      overlay.className = "loading";
-      overlay.innerHTML = `<div class="loading-wrap"><div class="spinner"></div><div class="label">Generating…</div></div>`;
-      brick.appendChild(overlay);
-    }
-
-    let safetyState = entry.isSafe;
-    if (safetyState === undefined || safetyState === null) {
-      safetyState = safetyIndex.has(entry.canonical) ? safetyIndex.get(entry.canonical) : null;
-    }
-    rememberImageSafety(entry.canonical, safetyState);
-    applySafetyOverlay(brick, safetyState);
-
-    container.appendChild(brick);
-    rendered += 1;
-  }
-
-  if (rendered === 0) {
-    const placeholder = document.createElement("div");
-    placeholder.className = "rank-placeholder";
-    const limit = topK && topK > 0 ? topK : null;
-    placeholder.textContent = limit ? `Select top ${limit} images` : "Select images to rank";
-    container.appendChild(placeholder);
-  }
-
-  if (rankSection) rankSection.classList.remove("hidden");
-  if (nextWrap) nextWrap.classList.remove("hidden");
-  setTilesPerRow(rendered || 6);
-  syncSafetyOverlays();
-  syncSelectionStyles();
-  updateActionButtons();
-
-  const currentZoom = zoomImg?.dataset?.src || null;
-  const zoomTarget = currentZoom && selectedOrder.includes(currentZoom)
-    ? currentZoom
-    : (selectedOrder.length ? selectedOrder[0] : null);
-  if (zoomTarget) {
-    setZoomByCanonical(zoomTarget);
-  } else {
-    clearZoomSelection();
-  }
-
-  return rendered;
-}
-
-function syncSelectionStyles() {
-  const selectedSet = new Set(selectedOrder);
-  if (gridContainer) {
-    gridContainer.querySelectorAll(".brick").forEach((brick) => {
-      const canonical = brick.dataset?.canonical;
-      brick.classList.toggle("selected", selectedSet.has(canonical));
-    });
-  }
-}
-
-function toggleSelection(canonical) {
-  if (!canonical) return;
-  const limit = topK && topK > 0 ? topK : candidates.length;
-  const isSelected = selectedOrder.includes(canonical);
-
-  if (isSelected) {
-    selectedOrder = selectedOrder.filter((c) => c !== canonical);
-  } else {
-    if (selectedOrder.length >= limit) {
-      if (statusEl) statusEl.textContent = `Select up to ${limit} images to rank.`;
-      return;
-    }
-    selectedOrder.push(canonical);
-  }
-
-  renderRankingFromSelection();
-  syncSelectionStyles();
-  updateActionButtons();
-}
-
-function setZoomByCanonical(canonical) {
-  if (!canonical) {
-    clearZoomSelection();
-    return;
-  }
-  const bricks = [];
-  if (container) bricks.push(...container.querySelectorAll(".brick"));
-  if (gridContainer) bricks.push(...gridContainer.querySelectorAll(".brick"));
-  const target = bricks.find((b) => (b.dataset?.canonical || b.dataset?.src) === canonical);
-  if (target) {
-    showZoomForBrick(target);
-  }
 }
 
 // ---------- demographics gating ----------
@@ -835,7 +567,7 @@ function getCheckedValues(name) {
 
 function collectDemographicsPayload() {
   if (!demoForm) return {};
-  const payload = {
+  return {
     age_group: getCheckedValue("age_group"),
     gender_identity: getCheckedValue("gender_identity"),
     gender_self_describe: demoForm.querySelector("#genderSelfDescribe")?.value || null,
@@ -845,7 +577,6 @@ function collectDemographicsPayload() {
     domain_background: getCheckedValues("domain_background"),
     participant_id: demographicsParticipantId,
   };
-  return payload;
 }
 
 async function submitDemographics(event) {
@@ -904,10 +635,6 @@ async function startProcess() {
     const resp = await fetch("/api/start", { method: "POST" });
     if (!resp.ok) throw new Error("start failed");
     const data = await resp.json();
-    if (data.top_k !== undefined) {
-      setTopKValue(data.top_k);
-    }
-    updateRankMidLabel();
     if (data.stage) {
       applyStagePayload(data.stage);
     } else {
@@ -936,92 +663,154 @@ if (startBtn) startBtn.addEventListener("click", handleStartClick);
 
 // ---------- placeholders + per-slot reveal ----------
 function renderPlaceholders(n) {
-  candidates = [];
+  container.innerHTML = "";
+  clearZoomSelection();
+  container.style.display = "grid";
+  container.style.gap = "16px";
+  container.style.overflow = "visible";
+
   for (let i = 0; i < n; i++) {
-    const canonical = `${SLOTS_BASE}/slot-${i}.png`;
-    candidates.push({
-      slot: i,
-      canonical,
-      basename: `slot-${i}.png`,
-      isSafe: null,
-      loaded: false,
-    });
-    safetyIndex.delete(canonical);
+    const brick = document.createElement("div");
+    brick.className = "brick";
+    brick.dataset.slot = String(i);
+
+    const img = new Image();
+    img.alt = "";
+    img.dataset.basename = `slot-${i}.png`;
+    img.dataset.src = `${SLOTS_BASE}/slot-${i}.png`;
+    safetyIndex.delete(img.dataset.src);
+    brick.appendChild(img);
+
+    const overlay = document.createElement("div");
+    overlay.className = "loading";
+    overlay.innerHTML = `<div class="loading-wrap"><div class="spinner"></div><div class="label">Generating…</div></div>`;
+    brick.appendChild(overlay);
+
+    container.appendChild(brick);
   }
-  resetSelectionToCandidateOrder();
-  renderGrid({ showLoading: true });
-  renderRankingFromSelection({ showLoading: true });
 }
 
-function renderImageList(images) {
+function slotIndexFromCanonical(canonical) {
+  if (typeof canonical !== "string") return null;
+  const match = canonical.match(/slot-(\d+)/);
+  if (!match) return null;
+  const idx = Number(match[1]);
+  return Number.isFinite(idx) ? idx : null;
+}
+
+function populateBrickWithImage(brick, normalized) {
+  if (!brick || !normalized || !normalized.canonical) return;
+  let img = brick.querySelector("img");
+  if (!img) {
+    img = document.createElement("img");
+    img.alt = "";
+    img.style.maxWidth = "100%";
+    img.style.display = "block";
+    brick.innerHTML = "";
+    brick.appendChild(img);
+  }
+
+  const canonical = normalized.canonical;
+  img.src = `${canonical}?v=${Date.now()}`;
+  img.dataset.basename = canonical.split("/").pop();
+  img.dataset.src = canonical;
+
+  rememberImageSafety(canonical, normalized.isSafe);
+  applySafetyOverlay(brick, normalized.isSafe);
+
+  const overlay = brick.querySelector(".loading");
+  if (overlay) overlay.remove();
+}
+
+function renderImageList(images, options = {}) {
   if (!container) return 0;
   const list = Array.isArray(images) ? images : [];
-
-  candidates = [];
-  list.forEach((entry, idx) => {
+  const expectedCount = Number.isFinite(options.expectedCount) ? Math.max(0, options.expectedCount) : null;
+  const normalizedList = [];
+  for (const entry of list) {
     const normalized = normalizeImageEntry(entry);
     const canonical = normalized?.canonical || canonicalizeImageSrc(normalized?.url);
-    if (!canonical) return;
-    candidates.push({
-      slot: idx,
-      canonical,
-      basename: canonical.split("/").pop(),
-      isSafe: normalized.isSafe,
-      loaded: true,
-    });
-  });
+    if (!canonical) continue;
+    normalizedList.push({ ...normalized, canonical });
+  }
 
-  resetSelectionToCandidateOrder();
-  renderGrid({ showLoading: false });
-  const rendered = renderRankingFromSelection({ showLoading: false });
-  syncSelectionStyles();
-  return rendered;
+  // If we know more images are expected than currently exist, keep placeholders visible.
+  if (expectedCount && expectedCount > normalizedList.length) {
+    renderPlaceholders(expectedCount);
+    normalizedList.forEach((normalized) => {
+      const slotIdx = slotIndexFromCanonical(normalized.canonical);
+      let brick = null;
+      if (slotIdx !== null) {
+        brick = container.querySelector(`.brick[data-slot="${slotIdx}"]`);
+      }
+      if (!brick) {
+        brick = container.querySelector(".brick:not(.filled)") || null;
+      }
+      if (!brick) {
+        brick = document.createElement("div");
+        brick.className = "brick";
+        container.appendChild(brick);
+      }
+      brick.classList.add("filled");
+      populateBrickWithImage(brick, normalized);
+    });
+    container.querySelectorAll(".brick.filled").forEach((b) => b.classList.remove("filled"));
+
+    if (rankSection) rankSection.classList.remove("hidden");
+    if (nextWrap) nextWrap.classList.remove("hidden");
+
+    setTilesPerRow(expectedCount || 6);
+    return expectedCount;
+  }
+
+  container.innerHTML = "";
+  clearZoomSelection();
+  container.style.display = "grid";
+  container.style.gap = "16px";
+  container.style.overflow = "visible";
+
+  let rendered = 0;
+  for (const normalized of normalizedList) {
+    const canonical = normalized.canonical;
+    const div = document.createElement("div");
+    div.className = "brick";
+    populateBrickWithImage(div, normalized);
+    container.appendChild(div);
+    rendered += 1;
+  }
+
+  if (rankSection) rankSection.classList.remove("hidden");
+  if (nextWrap) nextWrap.classList.remove("hidden");
+
+  setTilesPerRow((expectedCount && expectedCount > rendered) ? expectedCount : (rendered || 6));
+  return (expectedCount && expectedCount > rendered) ? expectedCount : rendered;
 }
 
 async function setSlotImage(slot, round) {
+  const brick = container.querySelector(`.brick[data-slot="${slot}"]`);
+  if (!brick) return;
+  const img = brick.querySelector("img");
+  const overlay = brick.querySelector(".loading");
+
   const canonical = `${SLOTS_BASE}/slot-${slot}.png`;
-  const entry = getCandidateBySlot(slot);
-  if (entry) {
-    entry.canonical = canonical;
-    entry.basename = `slot-${slot}.png`;
-    entry.loaded = true;
+  img.dataset.basename = `slot-${slot}.png`;
+  img.dataset.src = canonical;
+  markImageSafetyUnknown(canonical, brick);
+  img.src = `${canonical}?v=${round}&t=${Date.now()}`;
+
+  if (img.decode) { try { await img.decode(); } catch { } }
+  overlay.style.display = "none";
+
+  let safetyState = true;
+  if (canonical) {
+    safetyState = safetyIndex.has(canonical) ? safetyIndex.get(canonical) : null;
   }
-
-  const bricks = [];
-  if (gridContainer) {
-    const gridBrick = gridContainer.querySelector(`.brick[data-slot="${slot}"]`);
-    if (gridBrick) bricks.push(gridBrick);
-  }
-  if (container) {
-    const rankBrick = container.querySelector(`.brick[data-slot="${slot}"]`);
-    if (rankBrick) bricks.push(rankBrick);
-  }
-
-  for (const brick of bricks) {
-    const img = brick.querySelector("img");
-    const overlay = brick.querySelector(".loading");
-    if (!img) continue;
-
-    img.dataset.basename = `slot-${slot}.png`;
-    img.dataset.src = canonical;
-    markImageSafetyUnknown(canonical, brick);
-    img.src = `${canonical}?v=${round}&t=${Date.now()}`;
-
-    if (img.decode) { try { await img.decode(); } catch { } }
-    if (overlay) overlay.style.display = "none";
-
-    let safetyState = true;
-    if (canonical) {
-      safetyState = safetyIndex.has(canonical) ? safetyIndex.get(canonical) : null;
-    }
-    if (entry && safetyState !== undefined) {
-      entry.isSafe = safetyState;
-    }
-    applySafetyOverlay(brick, safetyState);
-  }
-
+  applySafetyOverlay(brick, safetyState);
   refreshSafetyFromServer();
-  setZoomByCanonical(zoomImg?.dataset?.src || null);
+
+  if (selectedBrick === brick) {
+    showZoomForBrick(brick);
+  }
 }
 
 // ---------- SSE (push) ----------
@@ -1097,15 +886,12 @@ es.onerror = () => {
 es.addEventListener("stage", (ev) => {
   try {
     const payload = JSON.parse(ev.data);
-    if (payload && payload.top_k !== undefined) {
-      setTopKValue(payload.top_k);
-    }
-    updateRankMidLabel();
     if (payload && payload.stage) {
       applyStagePayload(payload.stage);
     }
     if (payload && Array.isArray(payload.images) && payload.images.length) {
       renderImageList(payload.images);
+      refreshSafetyFromServer();
     }
   } catch (err) {
     console.error("stage event parse failed", err);
@@ -1117,15 +903,35 @@ async function refreshStageStatus() {
     const resp = await fetch("/api/stage/status");
     if (!resp.ok) return;
     const data = await resp.json();
-    if (data.top_k !== undefined) {
-      setTopKValue(data.top_k);
-    }
-    updateRankMidLabel();
     if (data && data.stage) {
       applyStagePayload(data.stage);
     }
-    if (data && Array.isArray(data.images) && data.images.length) {
-      renderImageList(data.images);
+
+    const serverExpected = Number.isFinite(data?.expected) ? Number(data.expected) : null;
+    if (serverExpected !== null) {
+      expected = serverExpected;
+      setTilesPerRow(expected || 6);
+    }
+
+    if (Number.isFinite(data?.round)) {
+      currentRound = Number(data.round);
+    }
+    if (Number.isFinite(data?.iteration)) {
+      setIterationDisplay(Number(data.iteration));
+    }
+
+    const imagesFromServer = Array.isArray(data?.images) ? data.images : [];
+    received = imagesFromServer.length;
+
+    const targetExpected = serverExpected ?? expected ?? imagesFromServer.length;
+
+    renderImageList(imagesFromServer, { expectedCount: targetExpected });
+    refreshSafetyFromServer();
+
+    const inflight = Boolean(data?.inflight) || (targetExpected && received < targetExpected);
+    isGenerationInFlight = inflight;
+    if (inflight && statusEl && targetExpected) {
+      statusEl.textContent = `Loaded ${received}/${targetExpected}`;
     }
   } catch (err) {
     console.warn("stage status refresh failed", err);
@@ -1134,20 +940,36 @@ async function refreshStageStatus() {
 
 refreshStageStatus();
 
-// ---------- ranking ----------
-function getRanking() {
-  const order = [...container.querySelectorAll(".brick img")].map(img =>
-    img.dataset.basename ||
-    new URL(img.src, location.href).pathname.split("/").pop()
-  ).filter(Boolean);
-
-  // sanity check
-  console.log("ranking to send:", order);
-  return order;
+async function handleUiRefresh() {
+  if (!refreshUiBtn) return;
+  if (refreshUiBtn.disabled) return;
+  refreshUiBtn.disabled = true;
+  const prevStatus = statusEl ? statusEl.textContent : "";
+  if (statusEl) statusEl.textContent = "Refreshing images…";
+  try {
+    await refreshStageStatus();
+    if (statusEl) statusEl.textContent = "Refresh requested. Reloading images…";
+  } catch (err) {
+    if (statusEl) statusEl.textContent = "Refresh failed. Please try again.";
+  } finally {
+    refreshUiBtn.disabled = false;
+    setTimeout(() => {
+      if (statusEl && statusEl.textContent && statusEl.textContent.startsWith("Refresh")) {
+        statusEl.textContent = prevStatus;
+      }
+    }, 1800);
+  }
 }
 
-function getAllBasenames() {
-  return (candidates || []).map((c) => c.basename || (c.canonical ? c.canonical.split("/").pop() : null)).filter(Boolean);
+if (refreshUiBtn) {
+  refreshUiBtn.addEventListener("click", handleUiRefresh);
+}
+
+// ---------- ranking ----------
+function getSelection() {
+  const img = selectedBrick?.querySelector("img");
+  if (!img) return null;
+  return img.dataset.src || img.src || null;
 }
 
 // ---------- Next button ----------
@@ -1159,11 +981,9 @@ if (nextBtn) {
       updateActionButtons();
       return;
     }
-    const order = getRanking();
-    const allBasenamesSnapshot = getAllBasenames();
-    const required = topK && topK > 0 ? topK : order.length;
-    if (required && order.length < required) {
-      statusEl.textContent = `Select ${required} images to rank.`;
+    const selection = getSelection();
+    if (!selection) {
+      statusEl.textContent = "Please select an image.";
       return;
     }
     isGenerationInFlight = true;
@@ -1174,7 +994,7 @@ if (nextBtn) {
     setIterationDisplay(previewIteration, { commit: false });
 
     // show skeleton now (guess N from current tiles or default)
-    const nGuess = container.querySelectorAll(".brick").length || 6;
+    const nGuess = 9;
     renderPlaceholders(nGuess);
     setTilesPerRow(nGuess);
 
@@ -1182,7 +1002,7 @@ if (nextBtn) {
       const resp = await fetch("/api/next", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ranking: order, all_basenames: allBasenamesSnapshot })
+        body: JSON.stringify({ selection, n: nGuess })
       });
       if (!resp.ok) {
         throw new Error("Next failed.");
@@ -1201,28 +1021,18 @@ if (stageBtn) {
   stageBtn.addEventListener("click", async () => {
     if (isGenerationInFlight) return;
     stageBtn.disabled = true;
-    if (statusEl) statusEl.textContent = "Loading next images…";
-    const order = getRanking();
-    const required = topK && topK > 0 ? topK : order.length;
-    if (required && order.length < required) {
-      if (statusEl) statusEl.textContent = `Select ${required} images to rank.`;
-      stageBtn.disabled = false;
-      return;
-    }
+    if (statusEl) statusEl.textContent = "Advancing to next stage…";
     try {
       const resp = await fetch("/api/stage/next", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ranking: order }),
+        body: JSON.stringify({}),
       });
       let data = {};
       try {
         data = await resp.json();
       } catch {
         data = {};
-      }
-      if (data && data.top_k !== undefined) {
-        setTopKValue(data.top_k);
       }
       if (data && data.stage) {
         applyStagePayload(data.stage);
@@ -1231,22 +1041,22 @@ if (stageBtn) {
       }
       if (!resp.ok) {
         const reasonCode = data && data.reason ? String(data.reason) : null;
-        let friendly = "Unable to continue right now.";
-        if (reasonCode === "not-ready") friendly = "Finish the current set before continuing.";
-        else if (reasonCode === "no-stages") friendly = "No additional images are available.";
-        else if (reasonCode === "completed") friendly = "All image sets are complete.";
+        let friendly = "Next stage unavailable.";
+        if (reasonCode === "not-ready") friendly = "Finish the current stage before advancing.";
+        else if (reasonCode === "no-stages") friendly = "No additional stages are configured.";
+        else if (reasonCode === "completed") friendly = "All configured stages are complete.";
         throw new Error(friendly);
       }
 
       const rendered = renderImageList(data && Array.isArray(data.images) ? data.images : []);
       if (statusEl) {
         statusEl.textContent = rendered
-          ? `Loaded ${rendered} new candidates.`
-          : "Loading next set…";
+          ? `Next stage initialized with ${rendered} candidates.`
+          : "Next stage initialized. Waiting for new images…";
       }
     } catch (err) {
       if (statusEl) {
-        statusEl.textContent = `Unable to continue: ${err && err.message ? err.message : "unknown error"}`;
+        statusEl.textContent = `Next stage unavailable: ${err && err.message ? err.message : "unknown error"}`;
       }
     } finally {
       updateActionButtons();

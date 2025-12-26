@@ -15,6 +15,32 @@ if TYPE_CHECKING:  # pragma: no cover - type checking only
 ENGINE_STATE_VERSION = 1
 
 
+def _safe_int(value: Any, default: int | None = None) -> int | None:
+    """Cast to int when possible; otherwise return ``default``.
+
+    Avoids ``int(None)`` errors during serialization when optional fields (e.g.,
+    stage transitions without a round id) are present in history records.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def build_state_save_path(target: Path | str) -> Path:
+    """Return a file path for saving, generating a timestamped name for dirs."""
+    candidate = Path(target)
+    if candidate.suffix:
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        return candidate
+
+    directory = candidate
+    stem = directory.name or "state"
+    directory.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return directory / f"{stem}_{timestamp}.json"
+
+
 def _tensor_to_list(value: Any) -> Any:
     if value is None:
         return None
@@ -30,21 +56,41 @@ def _tensor_to_list(value: Any) -> Any:
 def _dict_to_serializable(record: Dict[str, Any]) -> Dict[str, Any]:
     serialized: Dict[str, Any] = {}
     for key, value in (record or {}).items():
-        vec, idx = value
-        serialized[key] = {
+        vec = None
+        idx = None
+        image_path = None
+        if isinstance(value, (list, tuple)):
+            if len(value) >= 2:
+                vec, idx = value[0], value[1]
+            if len(value) >= 3:
+                image_path = value[2]
+        elif isinstance(value, dict):
+            vec = value.get("vector")
+            idx = value.get("index")
+            image_path = value.get("image_path")
+        if vec is None or idx is None:
+            # Skip malformed entries rather than raising during save.
+            continue
+        entry = {
             "vector": _tensor_to_list(vec),
             "index": idx,
         }
+        if image_path is not None:
+            entry["image_path"] = str(image_path)
+        serialized[key] = entry
     return serialized
 
 
 def _dict_from_serialized(data: Dict[str, Any]) -> Dict[str, Any]:
     restored: Dict[str, Any] = {}
     for key, value in (data or {}).items():
-        restored[key] = (
-            np.asarray(value.get("vector", []), dtype=np.float64),
-            int(value.get("index", -1))
-        )
+        vector = np.asarray(value.get("vector", []), dtype=np.float64)
+        index = _safe_int(value.get("index", -1), -1)
+        image_path = value.get("image_path")
+        if image_path is None:
+            restored[key] = (vector, index)
+        else:
+            restored[key] = (vector, index, image_path)
     return restored
 
 
@@ -68,19 +114,39 @@ def export_engine_state(engine: "Engine") -> Dict[str, Any]:
     for item in getattr(engine, "ranking_history", []) or []:
         if not isinstance(item, dict):
             continue
-        train_version_value = item.get("train_version", 0)
+        train_version_value = _safe_int(item.get("train_version", 0), 0)
+
+        new_y_snapshot = item.get("new_y")
+        if isinstance(new_y_snapshot, torch.Tensor):
+            new_y_snapshot = _tensor_to_list(new_y_snapshot)
+
+        result_images_snapshot = item.get("result_images")
+        if isinstance(result_images_snapshot, (list, tuple)):
+            result_images_snapshot = [str(x) for x in result_images_snapshot]
+
+        ready_at_val = item.get("ready_at")
         try:
-            train_version_value = int(train_version_value)
+            ready_at_val = float(ready_at_val) if ready_at_val is not None else None
         except (TypeError, ValueError):
-            train_version_value = 0
+            ready_at_val = None
+
+        indices_payload: list[int] = []
+        for x in item.get("indices", []) or []:
+            val = _safe_int(x, None)
+            if val is not None:
+                indices_payload.append(val)
+
         history_payload.append({
-            "step": int(item.get("step", 0)),
-            "round": int(item.get("round", 0)),
+            "step": _safe_int(item.get("step"), 0) or 0,
+            "round": _safe_int(item.get("round"), None),
             "ranking": list(item.get("ranking", [])),
-            "indices": [int(x) for x in item.get("indices", [])],
+            "indices": indices_payload,
             "selected": item.get("selected"),
             "saved_at": item.get("saved_at"),
+            "ready_at": ready_at_val,
             "train_version": train_version_value,
+            "new_y": new_y_snapshot,
+            "result_images": result_images_snapshot,
         })
 
     train_history_payload: list[Dict[str, Any]] = []
@@ -141,8 +207,7 @@ def export_engine_state(engine: "Engine") -> Dict[str, Any]:
 
 
 def save_engine_state(engine: "Engine", path: Path | str, reason: str | None = None) -> Path:
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
+    p = build_state_save_path(path)
     state = export_engine_state(engine)
     state.setdefault("metadata", {})["reason"] = reason or "manual"
     with p.open("w", encoding="utf-8") as f:
@@ -165,8 +230,8 @@ def _to_tensor(data: Any, device: torch.device) -> torch.Tensor | None:
 def apply_engine_state(engine: "Engine", payload: Dict[str, Any], device: torch.device) -> None:
     engine_payload = payload.get("engine", {})
     cpu_device = torch.device("cpu")
-    engine.step = int(engine_payload.get("step", 0))
-    engine.seed = int(engine_payload.get("seed", engine.seed))
+    engine.step = _safe_int(engine_payload.get("step", 0), 0) or 0
+    engine.seed = _safe_int(engine_payload.get("seed", engine.seed), engine.seed) or engine.seed
     engine.last_selected_basename = engine_payload.get(
         "last_selected_basename")
     engine.component_weights = engine_payload.get(
@@ -204,17 +269,18 @@ def apply_engine_state(engine: "Engine", payload: Dict[str, Any], device: torch.
         engine.comp_pairs = torch.empty(
             (0, 2), dtype=torch.long, device=device)
 
-    engine.train_dataset_version = int(
-        engine_payload.get("train_dataset_version", getattr(engine, "train_dataset_version", 0)))
+    engine.train_dataset_version = _safe_int(
+        engine_payload.get("train_dataset_version", getattr(engine, "train_dataset_version", 0)),
+        getattr(engine, "train_dataset_version", 0)) or getattr(engine, "train_dataset_version", 0)
     dataset_history_payload = engine_payload.get("train_dataset_history") or []
     restored_history: list[Dict[str, Any]] = []
     for snapshot_payload in dataset_history_payload:
         if not isinstance(snapshot_payload, dict):
             continue
         restored_history.append({
-            "version": int(snapshot_payload.get("version", 0)),
-            "stage_index": int(snapshot_payload.get("stage_index", 0)),
-            "step": int(snapshot_payload.get("step", 0)),
+            "version": _safe_int(snapshot_payload.get("version", 0), 0) or 0,
+            "stage_index": _safe_int(snapshot_payload.get("stage_index", 0), 0) or 0,
+            "step": _safe_int(snapshot_payload.get("step", 0), 0) or 0,
             "reason": snapshot_payload.get("reason"),
             "train_X": _to_tensor(snapshot_payload.get("train_X"), cpu_device),
             "Y": _to_tensor(snapshot_payload.get("Y"), cpu_device),
@@ -243,7 +309,11 @@ def apply_engine_state(engine: "Engine", payload: Dict[str, Any], device: torch.
             normalized_ctx["new_I"] = [
                 int(i) for i in normalized_ctx.get("new_I", [])]
         if "round" in normalized_ctx:
-            normalized_ctx["round"] = int(normalized_ctx["round"])
+            round_val = _safe_int(normalized_ctx.get("round"), None)
+            if round_val is None:
+                normalized_ctx.pop("round", None)
+            else:
+                normalized_ctx["round"] = round_val
         if "iteration" in normalized_ctx and normalized_ctx["iteration"] is not None:
             try:
                 normalized_ctx["iteration"] = int(
@@ -264,11 +334,9 @@ def apply_engine_state(engine: "Engine", payload: Dict[str, Any], device: torch.
 
     meta = payload.get("metadata", {})
     stage_index_value = engine_payload.get("stage_index")
-    if stage_index_value is not None:
-        try:
-            engine.stage_index = max(0, int(stage_index_value))
-        except Exception:
-            pass
+    stage_index_cast = _safe_int(stage_index_value, None)
+    if stage_index_cast is not None:
+        engine.stage_index = max(0, stage_index_cast)
 
 
 def export_slider_history(engine: "Engine") -> list[Dict[str, Any]]:
@@ -277,6 +345,11 @@ def export_slider_history(engine: "Engine") -> list[Dict[str, Any]]:
         x_vals = entry.get("x") if isinstance(entry, dict) else None
         if not isinstance(x_vals, list):
             continue
+        ready_at_val = entry.get("ready_at")
+        try:
+            ready_at_val = float(ready_at_val) if ready_at_val is not None else None
+        except (TypeError, ValueError):
+            ready_at_val = None
         record: Dict[str, Any] = {
             "x": [float(v) for v in x_vals],
         }
@@ -292,6 +365,8 @@ def export_slider_history(engine: "Engine") -> list[Dict[str, Any]]:
                 record["timestamp"] = float(entry.get("timestamp"))
             except (TypeError, ValueError):
                 pass
+        if ready_at_val is not None:
+            record["ready_at"] = ready_at_val
         history.append(record)
     return history
 
@@ -302,12 +377,19 @@ def apply_slider_history(engine: "Engine", payload: list[Dict[str, Any]] | None)
         x_vals = entry.get("x") if isinstance(entry, dict) else None
         if not isinstance(x_vals, list):
             continue
+        ready_at_val = entry.get("ready_at")
+        try:
+            ready_at_val = float(ready_at_val) if ready_at_val is not None else None
+        except (TypeError, ValueError):
+            ready_at_val = None
         record: Dict[str, Any] = {
             "x": [float(v) for v in x_vals],
             "image": entry.get("image"),
             "similarity": entry.get("similarity"),
             "timestamp": entry.get("timestamp"),
         }
+        if ready_at_val is not None:
+            record["ready_at"] = ready_at_val
         history.append(record)
     setattr(engine, "slider_history", history)
 
@@ -351,8 +433,7 @@ def export_slider_state(engine: "Engine") -> Dict[str, Any]:
 
 
 def save_slider_state(engine: "Engine", path: Path | str, reason: str | None = None) -> Path:
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
+    p = build_state_save_path(path)
     state = export_slider_state(engine)
     state.setdefault("metadata", {})["reason"] = reason or "manual"
     with p.open("w", encoding="utf-8") as f:
@@ -372,15 +453,13 @@ def apply_slider_engine_state(engine: "Engine", payload: Dict[str, Any], device:
         engine_payload = {}
 
     if "step" in engine_payload:
-        try:
-            engine.step = int(engine_payload.get("step", engine.step))
-        except Exception:
-            pass
+        new_step = _safe_int(engine_payload.get("step", engine.step), engine.step)
+        if new_step is not None:
+            engine.step = new_step
     if "seed" in engine_payload:
-        try:
-            engine.seed = int(engine_payload.get("seed", engine.seed))
-        except Exception:
-            pass
+        new_seed = _safe_int(engine_payload.get("seed", engine.seed), engine.seed)
+        if new_seed is not None:
+            engine.seed = new_seed
 
     if "last_selected_basename" in engine_payload:
         engine.last_selected_basename = engine_payload.get(
@@ -437,10 +516,8 @@ def apply_slider_engine_state(engine: "Engine", payload: Dict[str, Any], device:
         engine.init_ready_timestamp = None
 
     if "stage_index" in engine_payload:
-        try:
-            engine.stage_index = max(
-                0, int(engine_payload.get("stage_index", engine.stage_index)))
-        except Exception:
-            pass
+        stage_cast = _safe_int(engine_payload.get("stage_index", engine.stage_index), engine.stage_index)
+        if stage_cast is not None:
+            engine.stage_index = max(0, stage_cast)
 
     engine.state_loaded = True

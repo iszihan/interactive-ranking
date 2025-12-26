@@ -21,6 +21,7 @@ const descriptionClose = document.getElementById("descriptionClose");
 const tutorialToggle = document.getElementById("tutorialToggle");
 const tutorialOverlay = document.getElementById("tutorialOverlay");
 const tutorialClose = document.getElementById("tutorialClose");
+const refreshUiBtn = document.getElementById("refreshUiBtn");
 const demoOverlay = document.getElementById("demoOverlay");
 const demoClose = document.getElementById("demoClose");
 const demoForm = document.getElementById("demoForm");
@@ -39,14 +40,9 @@ const defaultStageState = {
 };
 let stageState = { ...defaultStageState };
 let isGenerationInFlight = false;
-let selectedBrick = null;
-const safetyIndex = new Map();
-let safetyRefreshPromise = null;
-let safetyRefreshQueued = false;
-const SLOTS_BASE = "/slots"; // make sure this matches server
+let demographicsSubmitted = false;
 let demographicsEnabled = false;
 let demographicsParticipantId = null;
-let demographicsSubmitted = false;
 let demographicsConfigLoaded = false;
 
 function setBodyScrollLock(locked) {
@@ -62,7 +58,7 @@ function openDescriptionOverlay() {
 function closeDescriptionOverlay() {
   if (!descriptionOverlay) return;
   descriptionOverlay.classList.add("hidden");
-  if ((!tutorialOverlay || tutorialOverlay.classList.contains("hidden")) && (!demoOverlay || demoOverlay.classList.contains("hidden"))) {
+  if (( !tutorialOverlay || tutorialOverlay.classList.contains("hidden")) && (!demoOverlay || demoOverlay.classList.contains("hidden"))) {
     setBodyScrollLock(false);
   }
 }
@@ -76,7 +72,7 @@ function openTutorialOverlay() {
 function closeTutorialOverlay() {
   if (!tutorialOverlay) return;
   tutorialOverlay.classList.add("hidden");
-  if ((!descriptionOverlay || descriptionOverlay.classList.contains("hidden")) && (!demoOverlay || demoOverlay.classList.contains("hidden"))) {
+  if (( !descriptionOverlay || descriptionOverlay.classList.contains("hidden")) && (!demoOverlay || demoOverlay.classList.contains("hidden"))) {
     setBodyScrollLock(false);
   }
 }
@@ -113,7 +109,6 @@ if (descriptionOverlay) {
     }
   });
 }
-
 if (tutorialToggle) {
   tutorialToggle.addEventListener("click", openTutorialOverlay);
 }
@@ -137,18 +132,16 @@ if (demoOverlay) {
     }
   });
 }
-
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") {
-    if (descriptionOverlay && !descriptionOverlay.classList.contains("hidden")) {
-      closeDescriptionOverlay();
-    }
-    if (tutorialOverlay && !tutorialOverlay.classList.contains("hidden")) {
-      closeTutorialOverlay();
-    }
-    if (demoOverlay && !demoOverlay.classList.contains("hidden")) {
-      closeDemoOverlay();
-    }
+  if (event.key !== "Escape") return;
+  if (descriptionOverlay && !descriptionOverlay.classList.contains("hidden")) {
+    closeDescriptionOverlay();
+  }
+  if (tutorialOverlay && !tutorialOverlay.classList.contains("hidden")) {
+    closeTutorialOverlay();
+  }
+  if (demoOverlay && !demoOverlay.classList.contains("hidden")) {
+    closeDemoOverlay();
   }
 });
 
@@ -160,32 +153,14 @@ async function loadDemographicsConfig(force = false) {
     const data = await resp.json();
     demographicsEnabled = Boolean(data.enabled);
     demographicsParticipantId = data.participant_id || null;
-    demographicsConfigLoaded = true;
   } catch (err) {
     demographicsEnabled = false;
     demographicsParticipantId = null;
-    demographicsConfigLoaded = false; // allow retry on failure
+  } finally {
+    demographicsConfigLoaded = true;
   }
   return { enabled: demographicsEnabled, participant_id: demographicsParticipantId };
 }
-
-// Preload demographics config so the first Start click has data
-loadDemographicsConfig().catch(() => {
-  demographicsConfigLoaded = false;
-});
-
-async function autoOpenDemographicsIfEnabled() {
-  try {
-    const cfg = await loadDemographicsConfig();
-    if (cfg && cfg.enabled && !demographicsSubmitted && demoOverlay && demoForm) {
-      openDemoOverlay();
-    }
-  } catch (err) {
-    // best-effort; ignore errors to avoid blocking the app load
-  }
-}
-
-autoOpenDemographicsIfEnabled();
 
 function normalizeStagePayload(stage) {
   if (!stage || typeof stage !== "object") {
@@ -223,20 +198,16 @@ function applyStagePayload(stage) {
 function updateActionButtons() {
   const stageReady = stageState.hasStages && stageState.nextStageReady;
   if (nextBtn) {
-    const hasSelection = Boolean(selectedBrick);
-    nextBtn.disabled = Boolean(isGenerationInFlight || stageReady || !hasSelection);
+    nextBtn.disabled = Boolean(isGenerationInFlight || stageReady);
+    nextBtn.classList.toggle("hidden", stageReady);
   }
   if (stageBtn) {
     const shouldShow = stageReady;
     stageBtn.classList.toggle("hidden", !shouldShow);
     stageBtn.disabled = Boolean(isGenerationInFlight);
     if (shouldShow) {
-      const labelNumber = Number.isFinite(stageState.nextStageNumber)
-        ? stageState.nextStageNumber
-        : stageState.currentStage + 1;
-      stageBtn.textContent = Number.isFinite(labelNumber)
-        ? `Start Stage ${labelNumber}`
-        : "Start Next Stage";
+      // Keep the label user-facing as "Next" so stage transitions feel seamless.
+      stageBtn.textContent = "Next";
     }
   }
 }
@@ -249,7 +220,19 @@ if (rankSection) rankSection.classList.add("hidden");
 if (referenceSection) referenceSection.classList.add("hidden");
 if (iterationIndicator) iterationIndicator.classList.add("hidden");
 
-// ---------- selection (no drag ranking) ----------
+// ---------- drag-to-reorder ----------
+let draggingElem = null;
+let startX = 0;
+let startIndex = 0;
+let currentIndex = 0;
+let lastInteractionWasDrag = false;
+let selectedBrick = null;
+const DRAG_THRESHOLD_PX = 5;
+
+const SLOTS_BASE = "/slots"; // make sure this matches server
+const safetyIndex = new Map();
+let safetyRefreshPromise = null;
+let safetyRefreshQueued = false;
 
 function setIterationDisplay(value, { commit = true } = {}) {
   if (!iterationIndicator) return;
@@ -266,19 +249,6 @@ function setIterationDisplay(value, { commit = true } = {}) {
   if (commit) currentIteration = numeric;
   iterationIndicator.textContent = `Iteration ${numeric+1}`;
   iterationIndicator.classList.remove("hidden");
-}
-
-function updateReferenceImage(src) {
-  if (!referenceSection || !referenceImg) return;
-  if (!src) {
-    referenceImg.removeAttribute("src");
-    referenceSection.classList.add("hidden");
-    return;
-  }
-  const canonical = src.split("?")[0];
-  referenceImg.dataset.src = canonical;
-  referenceImg.src = `${canonical}?v=${Date.now()}`;
-  referenceSection.classList.remove("hidden");
 }
 
 function canonicalizeImageSrc(src) {
@@ -452,16 +422,115 @@ async function refreshSafetyFromServer() {
   return currentPromise;
 }
 
+function updateReferenceImage(src) {
+  if (!referenceSection || !referenceImg) return;
+  if (!src) {
+    referenceImg.removeAttribute("src");
+    referenceSection.classList.add("hidden");
+    return;
+  }
+  const canonical = src.split("?")[0];
+  referenceImg.dataset.src = canonical;
+  referenceImg.src = `${canonical}?v=${Date.now()}`;
+  referenceSection.classList.remove("hidden");
+}
+
 function indexOfElement(el) { return [...container.children].indexOf(el); }
 function getClientX(e) { return e.touches ? e.touches[0].clientX : e.clientX; }
 
-function onBrickClick(e) {
+function onMouseDown(e) {
   const brick = e.target.closest(".brick");
   if (!brick) return;
-  showZoomForBrick(brick);
+  e.preventDefault();
+  lastInteractionWasDrag = false;
+
+  draggingElem = brick;
+  startX = getClientX(e);
+  startIndex = indexOfElement(draggingElem);
+  currentIndex = startIndex;
+
+  draggingElem.classList.add("dragging");
+  document.addEventListener("mousemove", onMouseMove);
+  document.addEventListener("mouseup", onMouseUp);
+  document.addEventListener("touchmove", onMouseMove, { passive: false });
+  document.addEventListener("touchend", onMouseUp);
 }
-if (container) {
-  container.addEventListener("click", onBrickClick);
+container.addEventListener("mousedown", onMouseDown);
+container.addEventListener("touchstart", onMouseDown, { passive: false });
+
+function onMouseMove(e) {
+  e.preventDefault();
+  if (!draggingElem) return;
+
+  const deltaX = getClientX(e) - startX;
+  if (!lastInteractionWasDrag && Math.abs(deltaX) > DRAG_THRESHOLD_PX) {
+    lastInteractionWasDrag = true;
+  }
+  draggingElem.style.transform = `translateX(${deltaX}px)`;
+
+  const all = [...container.children];
+  const others = all.filter(el => el !== draggingElem);
+
+  function middle(el) { const r = el.getBoundingClientRect(); return r.left + r.width / 2; }
+  const midX = middle(draggingElem);
+
+  let newIndex = others.findIndex(other => midX < middle(other));
+  if (newIndex === -1) newIndex = others.length;
+
+  if (newIndex !== currentIndex) {
+    currentIndex = newIndex;
+    reorderGhosts();
+  }
+}
+
+function reorderGhosts() {
+  const bricks = [...container.children].filter(el => el !== draggingElem);
+  const spacing = draggingElem.getBoundingClientRect().width;
+  const cs = getComputedStyle(container);
+  const gap = parseFloat(cs.columnGap || cs.getPropertyValue?.("column-gap") || cs.gap || "0") || 0;
+  const offset = spacing + gap;
+
+  bricks.forEach((b, i) => {
+    b.style.transform = "";
+    if (startIndex < currentIndex && i >= startIndex && i < currentIndex) {
+      b.style.transform = `translateX(-${offset}px)`;
+    } else if (startIndex > currentIndex && i >= currentIndex && i < startIndex) {
+      b.style.transform = `translateX(${offset}px)`;
+    }
+  });
+}
+
+function onMouseUp() {
+  if (!draggingElem) return;
+
+  const droppedBrick = draggingElem;
+  const wasDrag = lastInteractionWasDrag;
+  const bricks = [...container.children].filter(el => el !== draggingElem);
+  bricks.forEach(b => { b.style.transform = ""; b.classList.add("resetting"); });
+
+  draggingElem.style.transform = "";
+  draggingElem.classList.remove("dragging");
+
+  const referenceNode = bricks[currentIndex] ?? null;
+  container.insertBefore(draggingElem, referenceNode);
+
+  draggingElem = null;
+  document.removeEventListener("mousemove", onMouseMove);
+  document.removeEventListener("mouseup", onMouseUp);
+  document.removeEventListener("touchmove", onMouseMove);
+  document.removeEventListener("touchend", onMouseUp);
+
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      bricks.forEach(b => b.classList.remove("resetting"));
+    });
+  });
+
+  if (!wasDrag) {
+    showZoomForBrick(droppedBrick);
+  }
+
+  lastInteractionWasDrag = false;
 }
 
 function clearZoomSelection() {
@@ -473,7 +542,6 @@ function clearZoomSelection() {
   }
   if (zoomSection) zoomSection.classList.add("hidden");
   updateZoomSafety(null);
-  updateActionButtons();
 }
 
 function showZoomForBrick(brick) {
@@ -493,10 +561,9 @@ function showZoomForBrick(brick) {
   zoomImg.dataset.src = canonical;
   zoomSection.classList.remove("hidden");
   updateZoomSafety(canonical);
-  updateActionButtons();
 }
 
-// selection happens on click
+// selection happens on mouse/touch release (see onMouseUp)
 
 // ---------- layout helpers ----------
 function setTilesPerRow(N) {
@@ -519,7 +586,7 @@ function getCheckedValues(name) {
 
 function collectDemographicsPayload() {
   if (!demoForm) return {};
-  return {
+  const payload = {
     age_group: getCheckedValue("age_group"),
     gender_identity: getCheckedValue("gender_identity"),
     gender_self_describe: demoForm.querySelector("#genderSelfDescribe")?.value || null,
@@ -529,6 +596,7 @@ function collectDemographicsPayload() {
     domain_background: getCheckedValues("domain_background"),
     participant_id: demographicsParticipantId,
   };
+  return payload;
 }
 
 async function submitDemographics(event) {
@@ -617,9 +685,9 @@ if (startBtn) startBtn.addEventListener("click", handleStartClick);
 function renderPlaceholders(n) {
   container.innerHTML = "";
   clearZoomSelection();
-  container.style.display = "grid";
-  container.style.gap = "16px";
-  container.style.overflow = "visible";
+  container.style.display = "flex";
+  container.style.gap = "12px";
+  container.style.overflowX = "auto";
 
   for (let i = 0; i < n; i++) {
     const brick = document.createElement("div");
@@ -648,9 +716,11 @@ function renderImageList(images) {
 
   container.innerHTML = "";
   clearZoomSelection();
-  container.style.display = "grid";
-  container.style.gap = "16px";
-  container.style.overflow = "visible";
+  container.style.display = "flex";
+  container.style.flexDirection = "row";
+  container.style.flexWrap = "nowrap";
+  container.style.gap = "12px";
+  container.style.overflowX = "auto";
 
   let rendered = 0;
   for (const entry of list) {
@@ -681,6 +751,7 @@ function renderImageList(images) {
   if (nextWrap) nextWrap.classList.remove("hidden");
 
   setTilesPerRow(rendered || 6);
+  syncSafetyOverlays();
   return rendered;
 }
 
@@ -789,7 +860,6 @@ es.addEventListener("stage", (ev) => {
     }
     if (payload && Array.isArray(payload.images) && payload.images.length) {
       renderImageList(payload.images);
-      refreshSafetyFromServer();
     }
   } catch (err) {
     console.error("stage event parse failed", err);
@@ -806,7 +876,6 @@ async function refreshStageStatus() {
     }
     if (data && Array.isArray(data.images) && data.images.length) {
       renderImageList(data.images);
-      refreshSafetyFromServer();
     }
   } catch (err) {
     console.warn("stage status refresh failed", err);
@@ -815,11 +884,41 @@ async function refreshStageStatus() {
 
 refreshStageStatus();
 
+async function handleUiRefresh() {
+  if (!refreshUiBtn) return;
+  if (refreshUiBtn.disabled) return;
+  refreshUiBtn.disabled = true;
+  const prevStatus = statusEl ? statusEl.textContent : "";
+  if (statusEl) statusEl.textContent = "Refreshing images…";
+  try {
+    await refreshStageStatus();
+    if (statusEl) statusEl.textContent = "Refresh requested. Reloading images…";
+  } catch (err) {
+    if (statusEl) statusEl.textContent = "Refresh failed. Please try again.";
+  } finally {
+    refreshUiBtn.disabled = false;
+    setTimeout(() => {
+      if (statusEl && statusEl.textContent && statusEl.textContent.startsWith("Refresh")) {
+        statusEl.textContent = prevStatus;
+      }
+    }, 1800);
+  }
+}
+
+if (refreshUiBtn) {
+  refreshUiBtn.addEventListener("click", handleUiRefresh);
+}
+
 // ---------- ranking ----------
-function getSelection() {
-  const img = selectedBrick?.querySelector("img");
-  if (!img) return null;
-  return img.dataset.src || img.src || null;
+function getRanking() {
+  const order = [...container.querySelectorAll(".brick img")].map(img =>
+    img.dataset.basename ||
+    new URL(img.src, location.href).pathname.split("/").pop()
+  ).filter(Boolean);
+
+  // sanity check
+  console.log("ranking to send:", order);
+  return order;
 }
 
 // ---------- Next button ----------
@@ -831,11 +930,7 @@ if (nextBtn) {
       updateActionButtons();
       return;
     }
-    const selection = getSelection();
-    if (!selection) {
-      statusEl.textContent = "Please select an image.";
-      return;
-    }
+    const order = getRanking();
     isGenerationInFlight = true;
     updateActionButtons();
     statusEl.textContent = "Starting…";
@@ -844,7 +939,7 @@ if (nextBtn) {
     setIterationDisplay(previewIteration, { commit: false });
 
     // show skeleton now (guess N from current tiles or default)
-    const nGuess = 9;
+    const nGuess = container.querySelectorAll(".brick").length || 6;
     renderPlaceholders(nGuess);
     setTilesPerRow(nGuess);
 
@@ -852,7 +947,7 @@ if (nextBtn) {
       const resp = await fetch("/api/next", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ selection, n: nGuess })
+        body: JSON.stringify({ ranking: order })
       });
       if (!resp.ok) {
         throw new Error("Next failed.");
@@ -871,12 +966,13 @@ if (stageBtn) {
   stageBtn.addEventListener("click", async () => {
     if (isGenerationInFlight) return;
     stageBtn.disabled = true;
-    if (statusEl) statusEl.textContent = "Advancing to next stage…";
+    if (statusEl) statusEl.textContent = "Loading next images…";
+    const order = getRanking();
     try {
       const resp = await fetch("/api/stage/next", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ ranking: order }),
       });
       let data = {};
       try {
@@ -891,22 +987,22 @@ if (stageBtn) {
       }
       if (!resp.ok) {
         const reasonCode = data && data.reason ? String(data.reason) : null;
-        let friendly = "Next stage unavailable.";
-        if (reasonCode === "not-ready") friendly = "Finish the current stage before advancing.";
-        else if (reasonCode === "no-stages") friendly = "No additional stages are configured.";
-        else if (reasonCode === "completed") friendly = "All configured stages are complete.";
+        let friendly = "Unable to continue right now.";
+        if (reasonCode === "not-ready") friendly = "Finish the current set before continuing.";
+        else if (reasonCode === "no-stages") friendly = "No additional images are available.";
+        else if (reasonCode === "completed") friendly = "All image sets are complete.";
         throw new Error(friendly);
       }
 
       const rendered = renderImageList(data && Array.isArray(data.images) ? data.images : []);
       if (statusEl) {
         statusEl.textContent = rendered
-          ? `Next stage initialized with ${rendered} candidates.`
-          : "Next stage initialized. Waiting for new images…";
+          ? `Loaded ${rendered} new candidates.`
+          : "Loading next set…";
       }
     } catch (err) {
       if (statusEl) {
-        statusEl.textContent = `Next stage unavailable: ${err && err.message ? err.message : "unknown error"}`;
+        statusEl.textContent = `Unable to continue: ${err && err.message ? err.message : "unknown error"}`;
       }
     } finally {
       updateActionButtons();

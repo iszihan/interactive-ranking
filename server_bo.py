@@ -125,7 +125,7 @@ DEMO_DIR = OUTPUT_DIR / "demographics"
 DEMO_DIR.mkdir(parents=True, exist_ok=True)
 
 STATE_PATH_OVERRIDE: Path | None = None
-STATE_SAVE_PATH_OVERRIDE: Path | None = None
+STATE_SAVE_DIR_OVERRIDE: Path | None = None
 
 _env_state_override = os.environ.get("ENGINE_STATE_PATH_OVERRIDE")
 if _env_state_override:
@@ -135,29 +135,39 @@ if _env_state_override:
     except Exception as exc:
         print(f"[env] Failed to apply ENGINE_STATE_PATH_OVERRIDE: {exc}")
 
-_env_state_save_override = os.environ.get("ENGINE_STATE_SAVE_PATH_OVERRIDE")
+_env_state_save_override = os.environ.get("ENGINE_STATE_SAVE_DIR_OVERRIDE")
+if not _env_state_save_override:
+    _env_state_save_override = os.environ.get(
+        "ENGINE_STATE_SAVE_PATH_OVERRIDE")
+    if _env_state_save_override:
+        print("[env] ENGINE_STATE_SAVE_PATH_OVERRIDE is deprecated; use ENGINE_STATE_SAVE_DIR_OVERRIDE.")
 if _env_state_save_override:
     try:
-        STATE_SAVE_PATH_OVERRIDE = Path(
+        STATE_SAVE_DIR_OVERRIDE = Path(
             _env_state_save_override)
         print(
-            f"[env] Using engine save state path override: {STATE_SAVE_PATH_OVERRIDE}")
+            f"[env] Using engine save state dir override: {STATE_SAVE_DIR_OVERRIDE}")
     except Exception as exc:
         print(
-            f"[env] Failed to apply ENGINE_STATE_SAVE_PATH_OVERRIDE: {exc}")
+            f"[env] Failed to apply ENGINE_STATE_SAVE_DIR_OVERRIDE: {exc}")
 
 app = FastAPI()
 DEMO_ENABLED: bool = False
 DEMO_PARTICIPANT_ID: str | None = None
+PRECOMPUTE_ENABLED: bool = False
 
 # Allow demographics to be set via environment (mirrors state-path handling)
 _env_demo_enabled = os.environ.get("DEMOGRAPHIC_ENABLED")
 _env_demo_participant = os.environ.get("DEMOGRAPHIC_PARTICIPANT_ID")
+_env_precompute_enabled = os.environ.get("PRECOMPUTE_ENABLED")
 if _env_demo_enabled:
     DEMO_ENABLED = str(_env_demo_enabled).lower() in {"1", "true", "yes", "on"}
 if _env_demo_participant:
     DEMO_PARTICIPANT_ID = _env_demo_participant
     DEMO_ENABLED = True
+if _env_precompute_enabled:
+    PRECOMPUTE_ENABLED = str(_env_precompute_enabled).lower() in {
+        "1", "true", "yes", "on"}
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -166,14 +176,23 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 @app.on_event("startup")
 async def _init_engine_once():
-    global engine, STATE_PATH_OVERRIDE, STATE_SAVE_PATH_OVERRIDE
+    global engine, STATE_PATH_OVERRIDE, STATE_SAVE_DIR_OVERRIDE
     if engine is None:
         engine = Engine(
             CONFIG_FILE,
             OUTPUT_DIR,
             state_path=STATE_PATH_OVERRIDE,
-            save_state_path=STATE_SAVE_PATH_OVERRIDE,
+            save_state_dir=STATE_SAVE_DIR_OVERRIDE,
         )
+    eng = engine
+    if eng is None:
+        raise RuntimeError("Engine failed to initialize before precompute.")
+    if PRECOMPUTE_ENABLED:
+        print("[precompute] Starting precompute at startup…")
+        await asyncio.to_thread(eng.start)
+        print("[precompute] Precompute complete; exiting.")
+        _shutdown_gpu_pool(save_state=True)
+        os._exit(0)
 
 
 @app.on_event("shutdown")
@@ -222,7 +241,7 @@ class Engine:
     """
 
     def __init__(self, config_path: Path, outputs_dir: Path, *, state_path: Path | None = None,
-                 save_state_path: Path | None = None) -> None:
+                 save_state_dir: Path | None = None) -> None:
         self.outputs_dir = outputs_dir
         print(f"Outputs dir: {self.outputs_dir}")
         self.clear_outputs()
@@ -230,7 +249,7 @@ class Engine:
         self.config_path = Path(config_path).resolve()
         self.config_snapshot: dict | None = None
         self.state_path: Path | None = None
-        self.save_state_path: Path | None = None
+        self.save_state_dir: Path | None = None
         self.autosave_enabled = True
         self.autoload_state = True
         self.state_loaded = False
@@ -263,11 +282,11 @@ class Engine:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
             print(f"Engine state path: {self.state_path}")
 
-        save_path = save_state_path
-        if save_path:
-            self.save_state_path = Path(save_path)
-            self.save_state_path.parent.mkdir(parents=True, exist_ok=True)
-            print(f"Engine save state path: {self.save_state_path}")
+        save_dir = save_state_dir
+        if save_dir:
+            self.save_state_dir = Path(save_dir)
+            self.save_state_dir.mkdir(parents=True, exist_ok=True)
+            print(f"Engine save state dir: {self.save_state_dir}")
 
         self.num_observations = config.get('num_observations', 10)
         self.init_dir = config.get('init_dir', None)
@@ -534,22 +553,22 @@ class Engine:
             "weight_idx": 1,
         }
 
-    def save_state(self, reason: str | None = None, path: Path | str | None = None, *, force: bool = False) -> Path | None:
-        target = path or self.save_state_path
-        if target is None:
-            print("No save-state path configured; skipping save.")
+    def save_state(self, reason: str | None = None, save_dir: Path | str | None = None, *, force: bool = False) -> Path | None:
+        target_dir = save_dir or self.save_state_dir
+        if target_dir is None:
+            print("No save-state dir configured; skipping save.")
             return None
-        target = Path(target)
-        if not force and not self.autosave_enabled and self.save_state_path and target == self.save_state_path:
+        target_dir = Path(target_dir)
+        if not force and not self.autosave_enabled and self.save_state_dir and target_dir == self.save_state_dir:
             print("Autosave disabled; skipping save.")
             return None
         try:
-            saved_path = save_engine_state(self, target, reason=reason)
+            saved_path = save_engine_state(self, target_dir, reason=reason)
             print(
                 f"Saved engine state to {saved_path} ({reason or 'unspecified'})")
             return saved_path
         except Exception as exc:
-            print(f"Failed to save engine state to {target}: {exc}")
+            print(f"Failed to save engine state to {target_dir}: {exc}")
             return None
 
     def load_state(self, path: Path | str | None = None, *, reset: bool = False, force: bool = False) -> bool:
@@ -587,19 +606,25 @@ class Engine:
             print(f"Failed to load engine state from {target}: {exc}")
             return False
 
-    def _build_worker_payload(self, x_vector: np.ndarray) -> dict:
+    def _build_worker_payload(self, x_vector: np.ndarray, *, output_dir: str | None = None,
+                              is_init: bool = False) -> dict:
         lora_dim = len(self.component_weights)
         w_full = np.zeros(lora_dim)
         # Scale each LoRA by its parent dimension's scalar weight
-        w_vec = x_vector.reshape(-1)
+        w_vec = np.asarray(x_vector).reshape(-1)
         scale = w_vec[np.asarray(self.dim_index_per_lora, dtype=int)]
         w_full[self.lora_merge_indices] = np.asarray(
             self.lora_merge_weights) * scale
 
         state = copy.deepcopy(self.worker_state_template or {})
+        if output_dir:
+            state["output_dir"] = output_dir
+        if is_init:
+            state["is_init"] = True
+
         return {
             "state": state,
-            "x": x_vector.tolist(),
+            "x": w_vec.tolist(),
             "w": w_full.tolist(),
         }
 
@@ -843,18 +868,6 @@ class Engine:
         self._archive_current_train_dataset(
             reason=f"stage-{self.stage_index}-complete")
 
-        if ranking_basenames:
-            self.ranking_history.append({
-                "event": "stage-advance",
-                "stage_index": int(self.stage_index),
-                "step": int(self.step),
-                "round": None,
-                "ranking": list(ranking_basenames),
-                "indices": [],
-                "selected": getattr(self, "last_selected_basename", None),
-                "saved_at": time.time(),
-                "train_version": int(self.train_dataset_version),
-            })
         self._begin_new_train_dataset_version()
 
         self.stage_index += 1
@@ -871,6 +884,19 @@ class Engine:
                 if rec is None:
                     continue
                 ranked_indices.append(int(rec[1]))
+        if ranking_basenames:
+            self.ranking_history.append({
+                "event": "stage-advance",
+                "stage_index": int(self.stage_index),
+                "step": int(self.step),
+                "round": None,
+                "ranking": list(ranking_basenames),
+                "indices": ranked_indices,
+                "new_y": [float(self.Y[i].item()) if self.Y is not None and i < self.Y.shape[0] else None for i in ranked_indices],
+                "selected": getattr(self, "last_selected_basename", None),
+                "saved_at": time.time(),
+                "train_version": int(self.train_dataset_version),
+            })
 
         best_idx: int | None = ranked_indices[0] if ranked_indices else None
         self.comp_pairs = torch.empty((0, 2), dtype=torch.long, device=device)
@@ -941,8 +967,26 @@ class Engine:
     def construct_init_samples(self, *, capture_context: bool = False,
                                context_iteration: int | None = None):
         inf_f = self.f_init if self.train_X is None else self.f
-        self.x_observations, x_record = prepare_init_obs_simplex(self.num_observations, len(
-            self.dim2loras), inf_f, seed=self.seed, sparse_threshold=0.1, sampler=sample_dirichlet_simplex)
+        is_init_run = self.train_X is None
+
+        def _build_init_payload(x_np, _idx):
+            target_dir = str(self.init_dir) if is_init_run else str(OUTPUT_DIR)
+            return self._build_worker_payload(
+                x_np,
+                output_dir=target_dir,
+                is_init=is_init_run,
+            )
+
+        self.x_observations, x_record = prepare_init_obs_simplex(
+            self.num_observations,
+            len(self.dim2loras),
+            inf_f,
+            seed=self.seed,
+            sparse_threshold=0.1,
+            sampler=sample_dirichlet_simplex,
+            gpu_pool=self.gpu_pool,
+            payload_builder=_build_init_payload,
+        )
         seed_context: dict | None = None
         context_iteration_value = context_iteration if context_iteration is not None else int(
             self.step)
@@ -1482,14 +1526,14 @@ def health() -> dict:
 def api_save_state(payload: dict | None = Body(default=None)) -> JSONResponse:
     eng = _require_engine()
     data = payload or {}
-    path = data.get("path")
+    save_dir = data.get("dir") or data.get("path")
     reason = data.get("reason") or "api"
     force = bool(data.get("force", False))
-    saved_path = eng.save_state(reason=reason, path=path, force=force)
+    saved_path = eng.save_state(reason=reason, save_dir=save_dir, force=force)
     if not saved_path:
         return JSONResponse({
             "saved": False,
-            "path": str(path) if path else None,
+            "path": str(save_dir) if save_dir else None,
         }, status_code=400)
     return JSONResponse({"saved": True, "path": str(saved_path)})
 
@@ -1840,12 +1884,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Interactive ranking server")
     parser.add_argument("--state-path", dest="state_path", type=str,
                         help="Override path used to load engine state")
-    parser.add_argument("--save-state-path", dest="save_state_path", type=str,
-                        help="Override path used when saving engine state")
+    parser.add_argument("--save-state-dir", dest="save_state_dir", type=str,
+                        help="Directory used when saving engine state (timestamped file names)")
+    parser.add_argument("--save-state-path", dest="save_state_dir", type=str,
+                        help="[Deprecated] Alias for --save-state-dir")
     parser.add_argument("--demographic", dest="demographic", type=str,
                         help="Participant ID to enable demographic collection")
     parser.add_argument("--config", dest="config_path", type=str,
                         help="Path to config file override")
+    parser.add_argument("--precompute", action="store_true",
+                        help="Enable precompute mode (also via PRECOMPUTE_ENABLED env)")
     parser.add_argument("--port", dest="port", type=int, default=8000,
                         help="Port to bind the server (default: 8000)")
     parser.add_argument("--ssh", action="store_true",
@@ -1857,12 +1905,14 @@ if __name__ == "__main__":
         os.environ["ENGINE_STATE_PATH_OVERRIDE"] = str(STATE_PATH_OVERRIDE)
         print(f"[cli] Using engine state path override: {STATE_PATH_OVERRIDE}")
 
-    if args.save_state_path:
-        STATE_SAVE_PATH_OVERRIDE = Path(args.save_state_path).expanduser()
+    if args.save_state_dir:
+        STATE_SAVE_DIR_OVERRIDE = Path(args.save_state_dir).expanduser()
+        os.environ["ENGINE_STATE_SAVE_DIR_OVERRIDE"] = str(
+            STATE_SAVE_DIR_OVERRIDE)
         os.environ["ENGINE_STATE_SAVE_PATH_OVERRIDE"] = str(
-            STATE_SAVE_PATH_OVERRIDE)
+            STATE_SAVE_DIR_OVERRIDE)
         print(
-            f"[cli] Using engine save state path override: {STATE_SAVE_PATH_OVERRIDE}")
+            f"[cli] Using engine save state dir override: {STATE_SAVE_DIR_OVERRIDE}")
 
     if args.demographic:
         DEMO_ENABLED = True
@@ -1877,6 +1927,11 @@ if __name__ == "__main__":
         os.environ["CONFIG_PATH_OVERRIDE"] = str(config_override)
         CONFIG_FILE = config_override.resolve()
         print(f"[cli] Using config override: {CONFIG_FILE}")
+
+    if args.precompute:
+        PRECOMPUTE_ENABLED = True
+        os.environ["PRECOMPUTE_ENABLED"] = "1"
+        print("[cli] Precompute enabled")
 
     _register_shutdown_handlers()
     host = "127.0.0.1" if not args.ssh else "0.0.0.0"

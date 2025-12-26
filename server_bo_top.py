@@ -1,7 +1,6 @@
 # server_bo.py
 from serialize import export_engine_state, apply_engine_state, save_engine_state, load_engine_state
 from async_multi_gpu_pool import MultiGPUInferPool
-from helper.sampler import qmc_simplex_generator, get_mcmc_from_cache
 from search_benchmark.acq_prior import (
     qSimplexUpperConfidenceBound,
     stick_breaking_transform, inverse_stick_breaking_transform
@@ -19,7 +18,6 @@ from search_benchmark.comparison_solvers import fit_gpytorch_pair_model, pairwis
 from search_benchmark.multi_solvers import break_clusters_even
 from search_benchmark.util import sample_shuffled_unshuffled
 from helper.build_clusters import build_cluster_hierarchy, find_images_for_folders, build_tree
-from helper.sampler import sample_dirichlet_simplex
 from helper.infer import infer
 import argparse
 import signal
@@ -43,7 +41,7 @@ import multiprocessing
 import pytorch_lightning as pl
 import torch
 from fastapi import FastAPI, Body
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from io import BytesIO
@@ -124,7 +122,7 @@ DEMO_DIR = OUTPUT_DIR / "demographics"
 DEMO_DIR.mkdir(parents=True, exist_ok=True)
 
 STATE_PATH_OVERRIDE: Path | None = None
-STATE_SAVE_PATH_OVERRIDE: Path | None = None
+STATE_SAVE_DIR_OVERRIDE: Path | None = None
 
 _env_state_override = os.environ.get("ENGINE_STATE_PATH_OVERRIDE")
 if _env_state_override:
@@ -134,45 +132,84 @@ if _env_state_override:
     except Exception as exc:
         print(f"[env] Failed to apply ENGINE_STATE_PATH_OVERRIDE: {exc}")
 
-_env_state_save_override = os.environ.get("ENGINE_STATE_SAVE_PATH_OVERRIDE")
+_env_state_save_override = os.environ.get("ENGINE_STATE_SAVE_DIR_OVERRIDE")
+if not _env_state_save_override:
+    _env_state_save_override = os.environ.get("ENGINE_STATE_SAVE_PATH_OVERRIDE")
+    if _env_state_save_override:
+        print("[env] ENGINE_STATE_SAVE_PATH_OVERRIDE is deprecated; use ENGINE_STATE_SAVE_DIR_OVERRIDE.")
 if _env_state_save_override:
     try:
-        STATE_SAVE_PATH_OVERRIDE = Path(
-            _env_state_save_override)
+        STATE_SAVE_DIR_OVERRIDE = Path(_env_state_save_override)
         print(
-            f"[env] Using engine save state path override: {STATE_SAVE_PATH_OVERRIDE}")
+            f"[env] Using engine save state dir override: {STATE_SAVE_DIR_OVERRIDE}")
     except Exception as exc:
         print(
-            f"[env] Failed to apply ENGINE_STATE_SAVE_PATH_OVERRIDE: {exc}")
+            f"[env] Failed to apply ENGINE_STATE_SAVE_DIR_OVERRIDE: {exc}")
 
 app = FastAPI()
 DEMO_ENABLED: bool = False
 DEMO_PARTICIPANT_ID: str | None = None
+PRECOMPUTE_ENABLED: bool = False
 
 # Allow demographics to be set via environment (mirrors state-path handling)
 _env_demo_enabled = os.environ.get("DEMOGRAPHIC_ENABLED")
 _env_demo_participant = os.environ.get("DEMOGRAPHIC_PARTICIPANT_ID")
+_env_precompute_enabled = os.environ.get("PRECOMPUTE_ENABLED")
 if _env_demo_enabled:
     DEMO_ENABLED = str(_env_demo_enabled).lower() in {"1", "true", "yes", "on"}
 if _env_demo_participant:
     DEMO_PARTICIPANT_ID = _env_demo_participant
     DEMO_ENABLED = True
+if _env_precompute_enabled:
+    PRECOMPUTE_ENABLED = str(_env_precompute_enabled).lower() in {"1", "true", "yes", "on"}
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+
+class SafeStaticFiles(StaticFiles):
+    """StaticFiles that returns 404 instead of crashing when a file is missing."""
+
+    async def get_response(self, path: str, scope):  # type: ignore[override]
+        try:
+            return await super().get_response(path, scope)
+        except FileNotFoundError:
+            return Response(status_code=404)
+
+
+def _lazy_samplers(use_cached=True):
+    # Deferred import to avoid heavy init when unused (e.g., CLI help, health checks).
+    if use_cached:
+        from helper import sampler as _sampler
+    else:
+        from helper import sampler_nocache as _sampler
+    return (
+        _sampler.qmc_simplex_generator,
+        _sampler.get_mcmc_from_cache,
+        _sampler.sample_dirichlet_simplex,
+    )
 
 # helpers ------------------------------------------------------------
 
 
 @app.on_event("startup")
 async def _init_engine_once():
-    global engine, STATE_PATH_OVERRIDE, STATE_SAVE_PATH_OVERRIDE
+    global engine, STATE_PATH_OVERRIDE, STATE_SAVE_DIR_OVERRIDE
     if engine is None:
         engine = Engine(
             CONFIG_FILE,
             OUTPUT_DIR,
             state_path=STATE_PATH_OVERRIDE,
-            save_state_path=STATE_SAVE_PATH_OVERRIDE,
+            save_state_dir=STATE_SAVE_DIR_OVERRIDE,
         )
+    eng = engine
+    if eng is None:
+        raise RuntimeError("Engine failed to initialize before precompute.")
+    if PRECOMPUTE_ENABLED:
+        print("[precompute] Starting precompute at startup…")
+        await asyncio.to_thread(eng.start)
+        print("[precompute] Precompute complete; exiting.")
+        _shutdown_gpu_pool(save_state=True)
+        os._exit(0)
 
 
 @app.on_event("shutdown")
@@ -198,7 +235,17 @@ def _make_generation(engine, x: np.ndarray):
     sim_val, image_path = engine.f(x)
     # Read image and return bytes
     data = Path(image_path).read_bytes()
-    return data, x, sim_val
+    return data, x, sim_val, image_path
+
+
+def _is_valid_image_bytes(data: bytes) -> bool:
+    try:
+        with Image.open(BytesIO(data)) as img:
+            img.verify()
+        return True
+    except Exception as exc:
+        print(f"[safety] Image bytes failed verification: {exc}")
+        return False
 
 
 def ranking2pairs(ranked_indices):
@@ -221,7 +268,7 @@ class Engine:
     """
 
     def __init__(self, config_path: Path, outputs_dir: Path, *, state_path: Path | None = None,
-                 save_state_path: Path | None = None) -> None:
+                 save_state_dir: Path | None = None) -> None:
         self.outputs_dir = outputs_dir
         print(f"Outputs dir: {self.outputs_dir}")
         self.clear_outputs()
@@ -229,7 +276,7 @@ class Engine:
         self.config_path = Path(config_path).resolve()
         self.config_snapshot: dict | None = None
         self.state_path: Path | None = None
-        self.save_state_path: Path | None = None
+        self.save_state_dir: Path | None = None
         self.autosave_enabled = True
         self.autoload_state = True
         self.state_loaded = False
@@ -262,11 +309,11 @@ class Engine:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
             print(f"Engine state path: {self.state_path}")
 
-        save_path = save_state_path
-        if save_path:
-            self.save_state_path = Path(save_path)
-            self.save_state_path.parent.mkdir(parents=True, exist_ok=True)
-            print(f"Engine save state path: {self.save_state_path}")
+        save_dir = save_state_dir
+        if save_dir:
+            self.save_state_dir = Path(save_dir)
+            self.save_state_dir.mkdir(parents=True, exist_ok=True)
+            print(f"Engine save state dir: {self.save_state_dir}")
 
         self.num_observations = config.get('num_observations', 10)
         self.init_dir = config.get('init_dir', None)
@@ -283,6 +330,9 @@ class Engine:
         self.infer_steps = config.get('infer_steps', 30)
         self.num_observations_per_step = config.get(
             'num_observations_per_step', 5)
+        
+        self.mcmc_cache_enabled = bool(config.get('mcmc_cache_enabled', True))
+        print("Engine MCMC cache enabled:", self.mcmc_cache_enabled)
 
         # Stage iterations
         raw_stage_iterations = config.get('stage_iterations', [])
@@ -529,27 +579,28 @@ class Engine:
             "infer_steps": self.infer_steps,
             "infer_width": self.infer_width,
             "infer_height": self.infer_height,
-            "output_dir": str(self.outputs_dir),
+            # "output_dir": str(self.outputs_dir),
+            "output_dir": str(WORKING_DIR),
             "control_img_path": self.control_img_path,
             "weight_idx": 1,
         }
 
-    def save_state(self, reason: str | None = None, path: Path | str | None = None, *, force: bool = False) -> Path | None:
-        target = path or self.save_state_path
-        if target is None:
-            print("No save-state path configured; skipping save.")
+    def save_state(self, reason: str | None = None, save_dir: Path | str | None = None, *, force: bool = False) -> Path | None:
+        target_dir = save_dir or self.save_state_dir
+        if target_dir is None:
+            print("No save-state dir configured; skipping save.")
             return None
-        target = Path(target)
-        if not force and not self.autosave_enabled and self.save_state_path and target == self.save_state_path:
+        target_dir = Path(target_dir)
+        if not force and not self.autosave_enabled and self.save_state_dir and target_dir == self.save_state_dir:
             print("Autosave disabled; skipping save.")
             return None
         try:
-            saved_path = save_engine_state(self, target, reason=reason)
+            saved_path = save_engine_state(self, target_dir, reason=reason)
             print(
                 f"Saved engine state to {saved_path} ({reason or 'unspecified'})")
             return saved_path
         except Exception as exc:
-            print(f"Failed to save engine state to {target}: {exc}")
+            print(f"Failed to save engine state to {target_dir}: {exc}")
             return None
 
     def load_state(self, path: Path | str | None = None, *, reset: bool = False, force: bool = False) -> bool:
@@ -587,23 +638,30 @@ class Engine:
             print(f"Failed to load engine state from {target}: {exc}")
             return False
 
-    def _build_worker_payload(self, x_vector: np.ndarray) -> dict:
+    def _build_worker_payload(self, x_vector: np.ndarray, *, output_dir: str | None = None,
+                               is_init: bool = False) -> dict:
         lora_dim = len(self.component_weights)
         w_full = np.zeros(lora_dim)
         # Scale each LoRA by its parent dimension's scalar weight
-        w_vec = x_vector.reshape(-1)
+        w_vec = np.asarray(x_vector).reshape(-1)
         scale = w_vec[np.asarray(self.dim_index_per_lora, dtype=int)]
         w_full[self.lora_merge_indices] = np.asarray(
             self.lora_merge_weights) * scale
 
         state = copy.deepcopy(self.worker_state_template or {})
+        if output_dir:
+            state["output_dir"] = output_dir
+        if is_init:
+            state["is_init"] = True
+
         return {
             "state": state,
-            "x": x_vector.tolist(),
+            "x": w_vec.tolist(),
             "w": w_full.tolist(),
         }
 
     def _warmup_gpu_pool(self) -> None:
+        return  # --- IGNORE ---
         if not self.gpu_pool or self._pool_warmed:
             return
 
@@ -654,8 +712,10 @@ class Engine:
             }))
         self.x_record[out_path.name] = (x_vector, int(idx))
 
-    async def _generate_with_pool(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int, *, emit_events: bool = True):
+    async def _generate_with_pool(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int, result_images: list[str] | None = None, *, emit_events: bool = True):
         pending: dict[int, tuple[int, int]] = {}
+        if result_images is None:
+            result_images = [None for _ in range(new_x.shape[0])]
         for i in range(new_x.shape[0]):
             x_trial = new_x[i]
             if isinstance(x_trial, torch.Tensor):
@@ -675,17 +735,41 @@ class Engine:
             if isinstance(data, memoryview):
                 data = data.tobytes()
             x_vec = np.array(result["x"], dtype=np.float64)
-            new_y[slot_idx] = float(result["sim_val"])
+            image_path = result.get("image_path")
+            if not _is_valid_image_bytes(data):
+                print(f"[safety] Invalid image bytes for slot {slot_idx}; regenerating once in-process")
+                data, x_vec_regen, y_regen, image_path_regen = await asyncio.to_thread(_make_generation, self, x_vec)
+                if not _is_valid_image_bytes(data):
+                    raise RuntimeError(f"Regenerated image still invalid for slot {slot_idx}")
+                x_vec = np.array(x_vec_regen, dtype=np.float64)
+                new_y[slot_idx] = float(np.asarray(y_regen).flatten()[0])
+                image_path = image_path_regen
+            else:
+                new_y[slot_idx] = float(result.get("sim_val", new_y[slot_idx]))
+            if image_path:
+                result_images[slot_idx] = Path(image_path).name
             await self._finalize_slot(slot_idx, idx, data, x_vec, round_id, iteration, emit_events=emit_events)
 
-    async def _generate_in_process(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int, *, emit_events: bool = True):
+    async def _generate_in_process(self, new_x: torch.Tensor, new_I: List[int], new_y: List[float], round_id: int, iteration: int, result_images: list[str] | None = None, *, emit_events: bool = True):
+        if result_images is None:
+            result_images = [None for _ in range(new_x.shape[0])]
         for i in range(new_x.shape[0]):
             x_trial = new_x[i]
             if isinstance(x_trial, torch.Tensor):
                 x_trial = x_trial.detach().cpu().numpy()
             idx = new_I[i]
-            data, x_vec, y = await asyncio.to_thread(_make_generation, self, x_trial)
+            data, x_vec, y, image_path = await asyncio.to_thread(_make_generation, self, x_trial)
+            if not _is_valid_image_bytes(data):
+                print(f"[safety] Invalid image bytes for slot {i}; regenerating once")
+                data, x_vec_regen, y_regen, image_path_regen = await asyncio.to_thread(_make_generation, self, x_trial)
+                if not _is_valid_image_bytes(data):
+                    raise RuntimeError(f"Regenerated image still invalid for slot {i}")
+                x_vec = x_vec_regen
+                y = y_regen
+                image_path = image_path_regen
             new_y[i] = float(np.asarray(y).flatten()[0])
+            if image_path:
+                result_images[i] = Path(image_path).name
             await self._finalize_slot(i, idx, data, x_vec, round_id, iteration, emit_events=emit_events)
 
     async def recall_last_round(self, *, emit_events: bool = False) -> bool:
@@ -722,6 +806,12 @@ class Engine:
         else:
             new_y = [0.0 for _ in range(new_x_tensor.shape[0])]
 
+        regen_images = ctx.get("result_images")
+        if isinstance(regen_images, list) and len(regen_images) == new_x_tensor.shape[0]:
+            result_images = [str(v) if v is not None else None for v in regen_images]
+        else:
+            result_images = [None for _ in range(new_x_tensor.shape[0])]
+
         if emit_events:
             await self._events.put(("begin", {
                 "round": round_id,
@@ -730,15 +820,16 @@ class Engine:
             }))
 
         if self.gpu_pool:
-            await self._generate_with_pool(new_x_tensor, new_I_list, new_y, round_id, iteration)
+            await self._generate_with_pool(new_x_tensor, new_I_list, new_y, round_id, iteration, result_images)
         else:
-            await self._generate_in_process(new_x_tensor, new_I_list, new_y, round_id, iteration)
+            await self._generate_in_process(new_x_tensor, new_I_list, new_y, round_id, iteration, result_images)
 
         if emit_events:
             await self._events.put(("done", {"round": round_id, "iteration": iteration}))
 
         if self.last_round_context is not None:
             self.last_round_context["new_y"] = [float(val) for val in new_y]
+            self.last_round_context["result_images"] = list(result_images)
 
         return True
 
@@ -781,7 +872,9 @@ class Engine:
             restored = self.load_state()
 
         # Initialize mcmc cache regardless of restore state
-        get_mcmc_from_cache()
+        if not PRECOMPUTE_ENABLED:
+            _, lazy_get_mcmc, _ = _lazy_samplers(self.mcmc_cache_enabled)
+            lazy_get_mcmc()
 
         self.clear_outputs()
 
@@ -817,6 +910,15 @@ class Engine:
         os.makedirs(self.init_dir, exist_ok=True)
 
         self.construct_init_samples()
+        
+        if src_dir.exists():
+            for p in sorted(src_dir.glob("init*.png")):
+                try:
+                    shutil.copy2(p, OUTPUT_DIR / p.name)
+                except Exception:
+                    pass
+        self.init_dir = src_dir
+        os.makedirs(self.init_dir, exist_ok=True)
 
         print("Warming up GPU pool...")
         self._warmup_gpu_pool()
@@ -845,18 +947,6 @@ class Engine:
         self._archive_current_train_dataset(
             reason=f"stage-{self.stage_index}-complete")
 
-        if ranking_basenames:
-            self.ranking_history.append({
-                "event": "stage-advance",
-                "stage_index": int(self.stage_index),
-                "step": int(self.step),
-                "round": None,
-                "ranking": list(ranking_basenames),
-                "indices": [],
-                "selected": getattr(self, "last_selected_basename", None),
-                "saved_at": time.time(),
-                "train_version": int(self.train_dataset_version),
-            })
         self._begin_new_train_dataset_version()
 
         self.stage_index += 1
@@ -873,6 +963,20 @@ class Engine:
                 if rec is None:
                     continue
                 ranked_indices.append(int(rec[1]))
+        if ranking_basenames:
+            self.ranking_history.append({
+                "event": "stage-advance",
+                "stage_index": int(self.stage_index),
+                "step": int(self.step),
+                "round": None,
+                "ranking": list(ranking_basenames),
+                "indices": ranked_indices,
+                "new_y": [float(self.Y[i].item()) if self.Y is not None and i < self.Y.shape[0] else None for i in ranked_indices],
+                "selected": getattr(self, "last_selected_basename", None),
+                "saved_at": time.time(),
+                "ready_at": time.time(),
+                "train_version": int(self.train_dataset_version),
+            })
 
         best_idx: int | None = ranked_indices[0] if ranked_indices else None
         self.comp_pairs = torch.empty((0, 2), dtype=torch.long, device=device)
@@ -916,6 +1020,11 @@ class Engine:
 
         print(
             f"Active dimensions: {active_dims}, Inactive dimensions: {inactive_dims}")
+        
+        # If no active dims, keep all
+        if len(active_dims) == 0:
+            active_dims = torch.arange(len(dim2loras))
+            inactive_dims = torch.arange(0)
 
         dim2loras = {d: loras for d, loras in dim2loras.items()
                      if d in active_dims.tolist()}
@@ -943,8 +1052,28 @@ class Engine:
     def construct_init_samples(self, *, capture_context: bool = False,
                                context_iteration: int | None = None):
         inf_f = self.f_init if self.train_X is None else self.f
-        self.x_observations, x_record = prepare_init_obs_simplex(self.num_observations, len(
-            self.dim2loras), inf_f, seed=self.seed, sparse_threshold=0.1, sampler=sample_dirichlet_simplex)
+        is_init_run = self.train_X is None
+
+        def _build_init_payload(x_np, _idx):
+            target_dir = str(self.init_dir) if is_init_run else str(OUTPUT_DIR)
+            return self._build_worker_payload(
+                x_np,
+                output_dir=target_dir,
+                is_init=is_init_run,
+            )
+
+        _, _, lazy_dirichlet = _lazy_samplers(self.mcmc_cache_enabled)
+
+        self.x_observations, x_record = prepare_init_obs_simplex(
+            self.num_observations,
+            len(self.dim2loras),
+            inf_f,
+            seed=self.seed,
+            sparse_threshold=0.1,
+            sampler=lazy_dirichlet,
+            gpu_pool=self.gpu_pool,
+            payload_builder=_build_init_payload,
+        )
         seed_context: dict | None = None
         context_iteration_value = context_iteration if context_iteration is not None else int(
             self.step)
@@ -968,16 +1097,42 @@ class Engine:
 
             x_observations2 = self.x_observations[0]
             y_observations2 = self.x_observations[1]
-            for i in range(len(x_observations2)):
-                sample = torch.from_numpy(
-                    x_observations2[i]).double().to(device)
-                y = torch.from_numpy(y_observations2[i]).double().to(device)
+
+            samples = [torch.from_numpy(arr).double().to(device)
+                       for arr in x_observations2]
+            y_samples = [torch.from_numpy(val).double().to(device)
+                         for val in y_observations2]
+
+            # First, count which ones pass the distance gate.
+            accepted_indices: list[int] = []
+            for idx, sample in enumerate(samples):
                 if not any(torch.norm(sample - o) < dist_threshold for o in init_observations2):
-                    init_observations2.append(sample)
-                    init_y2.append(y)
-                else:
-                    print(
-                        f"Skipping observation {sample} as it is too close to existing ones.")
+                    accepted_indices.append(idx)
+
+            # Apply the accepted set.
+            for idx in accepted_indices:
+                init_observations2.append(samples[idx])
+                init_y2.append(y_samples[idx])
+
+            # If still short of the desired top_k, pick the farthest remaining samples.
+            target_k = int(getattr(self, "top_k", 0) or 0)
+            if target_k > 0 and len(init_observations2) < target_k:
+                remaining_indices = [i for i in range(len(samples)) if i not in accepted_indices]
+                # Greedy farthest-first selection against the current init_observations2.
+                while remaining_indices and len(init_observations2) < target_k:
+                    best_idx = None
+                    best_dist = -1.0
+                    for idx in remaining_indices:
+                        candidate = samples[idx]
+                        min_dist = min(torch.norm(candidate - o) for o in init_observations2)
+                        if float(min_dist) > best_dist:
+                            best_dist = float(min_dist)
+                            best_idx = idx
+                    if best_idx is None:
+                        break
+                    init_observations2.append(samples[best_idx])
+                    init_y2.append(y_samples[best_idx])
+                    remaining_indices = [i for i in remaining_indices if i != best_idx]
 
             init_observations2 = torch.stack(init_observations2).double()
 
@@ -1184,7 +1339,8 @@ class Engine:
         # )
 
         def generator(n, q, seed):
-            return qmc_simplex_generator(n, q, self.train_X.shape[1], seed)
+            lazy_qmc, _, _ = _lazy_samplers(self.mcmc_cache_enabled)
+            return lazy_qmc(n, q, self.train_X.shape[1], seed)
         Xinit_coeff = gen_batch_initial_conditions(
             acq_function=acq_function,
             bounds=coeff_bounds,
@@ -1355,7 +1511,7 @@ class Engine:
 
         pairwise_gp = fit_gpytorch_pair_model(self.train_X, self.comp_pairs)
         gp, latent_Y = pairwise_to_single_task(
-            self.train_X, self.Y, pairwise_gp)
+            self.train_X, self.Y, pairwise_gp, use_cached=self.mcmc_cache_enabled)
 
         print(f'self.train_X: {self.train_X}')
         print(f'self.comp_pairs: {self.comp_pairs}')
@@ -1412,7 +1568,7 @@ class Engine:
             round_id = int(asyncio.get_running_loop().time() * 1000)
         iteration = int(self.step) + 1
 
-        self.ranking_history.append({
+        ranking_entry = {
             "step": int(self.step),
             "round": int(round_id),
             "ranking": list(ranking_basenames),
@@ -1420,8 +1576,9 @@ class Engine:
             "indices": [int(x) for x in ranked_indices],
             "selected": self.last_selected_basename,
             "saved_at": time.time(),
+            "ready_at": None,
             "train_version": int(self.train_dataset_version),
-        })
+        }
 
         ctx_new_x = new_x.detach().cpu().tolist()
         self.last_round_context = {
@@ -1452,14 +1609,24 @@ class Engine:
 
         # Iterate and generate each slot given new_x
         new_y = [0 for _ in range(new_x.shape[0])]
+        result_basenames: list[str | None] = [None for _ in range(new_x.shape[0])]
         if self.gpu_pool:
-            await self._generate_with_pool(new_x, new_I, new_y, round_id, iteration)
+            await self._generate_with_pool(new_x, new_I, new_y, round_id, iteration, result_basenames)
         else:
-            await self._generate_in_process(new_x, new_I, new_y, round_id, iteration)
+            await self._generate_in_process(new_x, new_I, new_y, round_id, iteration, result_basenames)
+        ready_ts = time.time()
+        ranking_entry["ready_at"] = ready_ts
+        if self.last_round_context is not None:
+            self.last_round_context["ready_at"] = ready_ts
         new_y_results = list(new_y)
         if self.last_round_context is not None:
             self.last_round_context["new_y"] = [
                 float(val) for val in new_y_results]
+            self.last_round_context["result_images"] = list(result_basenames)
+
+        ranking_entry["new_y"] = [float(val) for val in new_y_results]
+        ranking_entry["result_images"] = [str(b) if b is not None else None for b in result_basenames]
+        self.ranking_history.append(ranking_entry)
 
         self.Y = torch.cat([self.Y, torch.zeros(
             (new_batch_size, 1), dtype=torch.double).to(device)], dim=0)  # for selected
@@ -1494,7 +1661,7 @@ app.mount("/description", StaticFiles(directory=str(DESCRIPTION_DIR)),
           name="description")
 app.mount("/tutorial", StaticFiles(directory=str(TUTORIAL_DIR)), name="tutorial")
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
-app.mount("/slots", StaticFiles(directory=str(SLOTS_DIR)), name="slots")
+app.mount("/slots", SafeStaticFiles(directory=str(SLOTS_DIR)), name="slots")
 
 
 @app.get("/")
@@ -1515,14 +1682,14 @@ def health() -> dict:
 def api_save_state(payload: dict | None = Body(default=None)) -> JSONResponse:
     eng = _require_engine()
     data = payload or {}
-    path = data.get("path")
+    save_dir = data.get("dir") or data.get("path")
     reason = data.get("reason") or "api"
     force = bool(data.get("force", False))
-    saved_path = eng.save_state(reason=reason, path=path, force=force)
+    saved_path = eng.save_state(reason=reason, save_dir=save_dir, force=force)
     if not saved_path:
         return JSONResponse({
             "saved": False,
-            "path": str(path) if path else None,
+            "path": str(save_dir) if save_dir else None,
         }, status_code=400)
     return JSONResponse({"saved": True, "path": str(saved_path)})
 
@@ -1676,7 +1843,7 @@ def start() -> JSONResponse:
     ranking_prompt = _ranking_prompt(getattr(eng, "top_k", None))
 
     MIN_COUNT = 1          # how many images make a “batch”
-    WAIT_TIMEOUT = 120.0
+    WAIT_TIMEOUT = 600.0
     deadline = time.monotonic() + WAIT_TIMEOUT
     while time.monotonic() < deadline:
         images = _list_image_urls()
@@ -1787,11 +1954,39 @@ async def next_step(req: NextRequest) -> JSONResponse:
 @app.get("/api/stage/status")
 async def api_stage_status() -> JSONResponse:
     eng = _require_engine()
+    images = _list_image_urls()
+
+    ctx = getattr(eng, "last_round_context", {}) if eng else {}
+
+    expected: int | None = None
+    round_id: int | None = None
+    iteration: int | None = None
+
+    if isinstance(ctx, dict):
+        round_id = ctx.get("round") if isinstance(ctx.get("round"), int) else None
+        iter_candidate = ctx.get("iteration", ctx.get("step"))
+        if isinstance(iter_candidate, int):
+            iteration = iter_candidate
+        n_ctx = ctx.get("n")
+        if isinstance(n_ctx, int):
+            expected = n_ctx
+
+    if expected is None:
+        expected = len(images)
+
+    inflight = bool(expected is not None and len(images) < expected)
+
+    top_k_val = getattr(eng, "top_k", None)
+
     return JSONResponse({
         "stage": eng.stage_status(),
-        "images": _list_image_urls(),
-        "top_k": getattr(eng, "top_k", None),
-        "ranking_prompt": _ranking_prompt(getattr(eng, "top_k", None)),
+        "images": images,
+        "top_k": top_k_val,
+        "ranking_prompt": _ranking_prompt(top_k_val),
+        "expected": int(expected) if expected is not None else None,
+        "inflight": inflight,
+        "round": int(round_id) if round_id is not None else None,
+        "iteration": int(iteration) if iteration is not None else None,
     })
 
 
@@ -1913,12 +2108,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Interactive ranking server")
     parser.add_argument("--state-path", dest="state_path", type=str,
                         help="Override path used to load engine state")
-    parser.add_argument("--save-state-path", dest="save_state_path", type=str,
-                        help="Override path used when saving engine state")
+    parser.add_argument("--save-state-dir", dest="save_state_dir", type=str,
+                        help="Directory used when saving engine state (timestamped file names)")
+    parser.add_argument("--save-state-path", dest="save_state_dir", type=str,
+                        help="[Deprecated] Alias for --save-state-dir")
     parser.add_argument("--demographic", dest="demographic", type=str,
                         help="Participant ID to enable demographic collection")
     parser.add_argument("--config", dest="config_path", type=str,
                         help="Path to config file override")
+    parser.add_argument("--precompute", action="store_true",
+                        help="Enable precompute mode (also via PRECOMPUTE_ENABLED env)")
     parser.add_argument("--port", dest="port", type=int, default=8000,
                         help="Port to bind the server (default: 8000)")
     parser.add_argument("--ssh", action="store_true",
@@ -1930,12 +2129,15 @@ if __name__ == "__main__":
         os.environ["ENGINE_STATE_PATH_OVERRIDE"] = str(STATE_PATH_OVERRIDE)
         print(f"[cli] Using engine state path override: {STATE_PATH_OVERRIDE}")
 
-    if args.save_state_path:
-        STATE_SAVE_PATH_OVERRIDE = Path(args.save_state_path).expanduser()
+    if args.save_state_dir:
+        STATE_SAVE_DIR_OVERRIDE = Path(args.save_state_dir).expanduser()
+        os.environ["ENGINE_STATE_SAVE_DIR_OVERRIDE"] = str(
+            STATE_SAVE_DIR_OVERRIDE)
+        # Keep the deprecated env var in sync for compatibility across processes.
         os.environ["ENGINE_STATE_SAVE_PATH_OVERRIDE"] = str(
-            STATE_SAVE_PATH_OVERRIDE)
+            STATE_SAVE_DIR_OVERRIDE)
         print(
-            f"[cli] Using engine save state path override: {STATE_SAVE_PATH_OVERRIDE}")
+            f"[cli] Using engine save state dir override: {STATE_SAVE_DIR_OVERRIDE}")
 
     if args.demographic:
         DEMO_ENABLED = True
@@ -1950,6 +2152,11 @@ if __name__ == "__main__":
         os.environ["CONFIG_PATH_OVERRIDE"] = str(config_override)
         CONFIG_FILE = config_override.resolve()
         print(f"[cli] Using config override: {CONFIG_FILE}")
+
+    if args.precompute:
+        PRECOMPUTE_ENABLED = True
+        os.environ["PRECOMPUTE_ENABLED"] = "1"
+        print("[cli] Precompute enabled")
 
     _register_shutdown_handlers()
     host = "127.0.0.1" if not args.ssh else "0.0.0.0"

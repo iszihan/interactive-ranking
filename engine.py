@@ -203,8 +203,14 @@ def obj_sim(gt_img_path, component_weights, x, weight_idx, infer_image_func,
 
 
 def prepare_init_obs(num_observations, num_dim, x_range, f, return_best=False,
-                     seed=0):
-    """Prepare initial observations for the optimization."""
+                     seed=0, gpu_pool=None, payload_builder=None,
+                     gpu_pool_fn: str = "worker_make_generation"):
+    """Prepare initial observations for the optimization.
+
+    If ``gpu_pool`` and ``payload_builder`` are provided, the evaluations are
+    dispatched to the MultiGPUInferPool using ``gpu_pool_fn``; otherwise the
+    fallback is the original sequential path.
+    """
     pl.seed_everything(seed)
 
     train_X = draw_sobol_samples(
@@ -214,14 +220,41 @@ def prepare_init_obs(num_observations, num_dim, x_range, f, return_best=False,
     x_record = {}
 
     best_sim_val = -float('inf')
-    for i in range(num_observations):
-        sim_val, image_path = f(
-            train_X[i].reshape(1, -1).detach().cpu().numpy())
+    best_x = None
+
+    def _record(idx, sim_val, image_path):
         x_record[Path(image_path).name] = (
-            train_X[i].detach().cpu().numpy(), -1)
-        if sim_val > best_sim_val:
-            best_sim_val = sim_val
-            best_x = train_X[i].detach().cpu().numpy()
+            train_X[idx].detach().cpu().numpy(), -1)
+
+    if gpu_pool is not None and payload_builder is not None:
+        payloads = []
+        for i in range(num_observations):
+            x_np = train_X[i].reshape(1, -1).detach().cpu().numpy()
+            payloads.append({"payload": payload_builder(x_np, i)})
+
+        results = gpu_pool.map(gpu_pool_fn, payloads)
+        for idx, res in enumerate(results):
+            if isinstance(res, dict):
+                sim_val = res.get("sim_val")
+                image_path = res.get("image_path") or res.get("path")
+            else:
+                sim_val, image_path = res
+
+            if image_path is None:
+                raise ValueError("GPU pool result missing image_path for init obs")
+
+            _record(idx, sim_val, image_path)
+            if sim_val > best_sim_val:
+                best_sim_val = sim_val
+                best_x = train_X[idx].detach().cpu().numpy()
+    else:
+        for i in range(num_observations):
+            sim_val, image_path = f(
+                train_X[i].reshape(1, -1).detach().cpu().numpy())
+            _record(i, sim_val, image_path)
+            if sim_val > best_sim_val:
+                best_sim_val = sim_val
+                best_x = train_X[i].detach().cpu().numpy()
 
     if return_best:
         return train_X.detach().cpu().numpy(), x_record, best_x
@@ -254,8 +287,15 @@ def sample_dirichlet_simplex(n_samples: int, d: int,
 
 
 def prepare_init_obs_simplex(num_observations, num_dim, f,
-                             seed=0, sparse_threshold=None, sampler=sample_dirichlet_simplex):
-    """Prepare initial observations for the optimization."""
+                             seed=0, sparse_threshold=None, sampler=sample_dirichlet_simplex,
+                             gpu_pool=None, payload_builder=None,
+                             gpu_pool_fn: str = "worker_make_generation"):
+    """Prepare initial observations for the optimization.
+
+    If ``gpu_pool`` and ``payload_builder`` are provided, dispatch evaluations
+    via MultiGPUInferPool to parallelize GPU-bound ``f`` while keeping the
+    image naming done inside ``f``/``obj_sim``.
+    """
     pl.seed_everything(seed)
 
     # n_samples: int, d: int, concentration: float = 1.0, seed
@@ -280,13 +320,36 @@ def prepare_init_obs_simplex(num_observations, num_dim, f,
     #     ).double().reshape(-1, 1)
 
     x_record = {}
-    yy = []
-    for i in range(num_observations):
-        sim_val, image_path = f(
-            train_X[i].reshape(1, -1).detach().cpu().numpy())
+    yy = [None] * num_observations
+
+    def _record(idx, sim_val, image_path):
         x_record[Path(image_path).name] = (
-            train_X[i].detach().cpu().numpy(), i)
-        yy.append(sim_val)
+            train_X[idx].detach().cpu().numpy(), idx)
+        yy[idx] = sim_val
+
+    if gpu_pool is not None and payload_builder is not None:
+        payloads = []
+        for i in range(num_observations):
+            x_np = train_X[i].reshape(1, -1).detach().cpu().numpy()
+            payloads.append({"payload": payload_builder(x_np, i)})
+
+        results = gpu_pool.map(gpu_pool_fn, payloads)
+        for idx, res in enumerate(results):
+            if isinstance(res, dict):
+                sim_val = res.get("sim_val")
+                image_path = res.get("image_path") or res.get("path")
+            else:
+                sim_val, image_path = res
+
+            if image_path is None:
+                raise ValueError("GPU pool result missing image_path for init obs")
+
+            _record(idx, sim_val, image_path)
+    else:
+        for i in range(num_observations):
+            sim_val, image_path = f(
+                train_X[i].reshape(1, -1).detach().cpu().numpy())
+            _record(i, sim_val, image_path)
 
     Y = torch.from_numpy(np.array(yy)).double().reshape(-1, 1)
 

@@ -8,6 +8,7 @@ const nextBtn = document.getElementById("nextBtn");
 const nextWrap = document.getElementById("nextWrap");
 const stageBtn = document.getElementById("stageBtn");
 const rankSection = document.getElementById("rankSection");
+const rankMidLabel = document.getElementById("rankMidLabel");
 const controls = document.getElementById("controls");
 const referenceSection = document.getElementById("referenceSection");
 const referenceImg = document.getElementById("referenceImg");
@@ -15,12 +16,16 @@ const zoomSection = document.getElementById("zoomSection");
 const zoomImg = document.getElementById("zoomImg");
 const zoomBrick = document.querySelector(".zoom-brick");
 const zoomSafetyOverlay = document.getElementById("zoomSafetyOverlay");
+const gridLabel = document.getElementById("gridLabel");
+const gridSection = document.getElementById("gridSection");
+const gridContainer = document.getElementById("gridContainer");
 const descriptionToggle = document.getElementById("descriptionToggle");
 const descriptionOverlay = document.getElementById("descriptionOverlay");
 const descriptionClose = document.getElementById("descriptionClose");
 const tutorialToggle = document.getElementById("tutorialToggle");
 const tutorialOverlay = document.getElementById("tutorialOverlay");
 const tutorialClose = document.getElementById("tutorialClose");
+const refreshUiBtn = document.getElementById("refreshUiBtn");
 const demoOverlay = document.getElementById("demoOverlay");
 const demoClose = document.getElementById("demoClose");
 const demoForm = document.getElementById("demoForm");
@@ -43,6 +48,73 @@ let demographicsSubmitted = false;
 let demographicsEnabled = false;
 let demographicsParticipantId = null;
 let demographicsConfigLoaded = false;
+let topK = null;
+let candidates = [];
+let selectedOrder = [];
+let zoomedBrick = null;
+
+function createCenterHoverZoom({ allowShow } = {}) {
+  const overlay = document.createElement("div");
+  overlay.className = "hover-zoom-overlay hidden";
+  const overlayImg = document.createElement("img");
+  overlay.append(overlayImg);
+  document.body.append(overlay);
+
+  const show = (imgEl) => {
+    if (!imgEl) return;
+    if (typeof allowShow === "function" && !allowShow(imgEl)) {
+      hide();
+      return;
+    }
+    const src = imgEl.currentSrc || imgEl.src;
+    if (!src) return;
+    overlayImg.src = src;
+    overlayImg.alt = imgEl.alt || "";
+    overlay.classList.remove("hidden");
+  };
+  const hide = () => overlay.classList.add("hidden");
+
+  const attach = (imgEl) => {
+    if (!imgEl) return;
+    imgEl.addEventListener("mouseenter", () => show(imgEl));
+    imgEl.addEventListener("mouseleave", hide);
+    imgEl.addEventListener("focus", () => show(imgEl));
+    imgEl.addEventListener("blur", hide);
+  };
+
+  return { attach, hide };
+}
+
+function isHoverZoomAllowed(imgEl) {
+  if (!imgEl) return false;
+  const unsafeAncestor = imgEl.closest(".nsfw-flagged, .nsfw-pending");
+  if (unsafeAncestor) return false;
+  const canonical = canonicalizeImageSrc(imgEl.dataset?.src || imgEl.currentSrc || imgEl.src);
+  if (!canonical) return true;
+  const state = safetyIndex.has(canonical) ? safetyIndex.get(canonical) : null;
+  return state !== false;
+}
+
+const hoverZoom = createCenterHoverZoom({ allowShow: isHoverZoomAllowed });
+hoverZoom.attach(referenceImg);
+hoverZoom.attach(zoomImg);
+
+// Keep the grid label in sync with the current topK value (or fall back).
+function updateGridLabel() {
+  if (!gridLabel) return;
+  const label = topK && topK > 0
+    ? `All images (right-click to select the top ${topK})`
+    : "All images (right-click to select)";
+  gridLabel.textContent = label;
+}
+
+// Allow a query param ?top_k= to set the initial label immediately (useful when
+// the API response arrives later or is cached).
+const initialTopKParam = Number(new URLSearchParams(window.location.search).get("top_k"));
+if (Number.isFinite(initialTopKParam) && initialTopKParam > 0) {
+  topK = Math.floor(initialTopKParam);
+}
+updateGridLabel();
 
 function setBodyScrollLock(locked) {
   document.body.classList.toggle("no-scroll", Boolean(locked));
@@ -144,6 +216,21 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+if (gridContainer) {
+  gridContainer.addEventListener("contextmenu", (event) => {
+    const brick = event.target.closest(".brick");
+    if (!brick) return;
+    event.preventDefault();
+    toggleSelection(brick.dataset?.canonical || brick.dataset?.src);
+  });
+
+  gridContainer.addEventListener("click", (event) => {
+    const brick = event.target.closest(".brick");
+    if (!brick) return;
+    setZoomByCanonical(brick.dataset?.canonical || brick.dataset?.src);
+  });
+}
+
 async function loadDemographicsConfig(force = false) {
   if (demographicsConfigLoaded && !force) return { enabled: demographicsEnabled, participant_id: demographicsParticipantId };
   try {
@@ -196,8 +283,10 @@ function applyStagePayload(stage) {
 
 function updateActionButtons() {
   const stageReady = stageState.hasStages && stageState.nextStageReady;
+  const selectionRequired = topK && topK > 0;
+  const selectionOk = !selectionRequired || selectedOrder.length >= topK;
   if (nextBtn) {
-    nextBtn.disabled = Boolean(isGenerationInFlight || stageReady);
+    nextBtn.disabled = Boolean(isGenerationInFlight || stageReady || !selectionOk);
     nextBtn.classList.toggle("hidden", stageReady);
   }
   if (stageBtn) {
@@ -225,7 +314,6 @@ let startX = 0;
 let startIndex = 0;
 let currentIndex = 0;
 let lastInteractionWasDrag = false;
-let selectedBrick = null;
 const DRAG_THRESHOLD_PX = 5;
 
 const SLOTS_BASE = "/slots"; // make sure this matches server
@@ -355,8 +443,10 @@ function applySafetyOverlay(brick, isSafe = true) {
 }
 
 function syncSafetyOverlays() {
-  if (!container) return;
-  container.querySelectorAll(".brick").forEach((brick) => {
+  const bricks = [];
+  if (container) bricks.push(...container.querySelectorAll(".brick"));
+  if (gridContainer) bricks.push(...gridContainer.querySelectorAll(".brick"));
+  bricks.forEach((brick) => {
     const img = brick.querySelector("img");
     if (!img) return;
     const canonical = img.dataset?.src;
@@ -432,6 +522,50 @@ function updateReferenceImage(src) {
   referenceImg.dataset.src = canonical;
   referenceImg.src = `${canonical}?v=${Date.now()}`;
   referenceSection.classList.remove("hidden");
+}
+
+function getSelectionLimit() {
+  return topK && topK > 0 ? Math.min(topK, candidates.length) : candidates.length;
+}
+
+function setTopKValue(value) {
+  const numeric = Number(value);
+  topK = Number.isFinite(numeric) && numeric > 0 ? Math.floor(numeric) : null;
+  clampSelectionToLimit();
+  updateRankMidLabel();
+  updateGridLabel();
+  updateActionButtons();
+}
+
+function updateRankMidLabel() {
+  if (!rankMidLabel) return;
+  const mid = topK && topK > 0 ? `Rank top ${topK}` : "Rank";
+  rankMidLabel.innerHTML = `<span class="rank-word-left">Closest</span> ←─── ${mid} ───→ <span class="rank-word-right">Farthest</span>`;
+}
+
+function syncSelectedOrderToCandidates() {
+  const validCanonicals = new Set((candidates || []).map((c) => c.canonical));
+  selectedOrder = selectedOrder.filter((c) => validCanonicals.has(c));
+}
+
+function clampSelectionToLimit() {
+  syncSelectedOrderToCandidates();
+  const limit = getSelectionLimit();
+  if (limit < 0) return;
+  selectedOrder = selectedOrder.slice(0, limit);
+}
+
+function resetSelectionToCandidateOrder() {
+  // Do not auto-select; start each round with an empty selection.
+  selectedOrder = [];
+}
+
+function getCandidateByCanonical(canonical) {
+  return (candidates || []).find((c) => c.canonical === canonical);
+}
+
+function getCandidateBySlot(slot) {
+  return (candidates || []).find((c) => Number(c.slot) === Number(slot));
 }
 
 function indexOfElement(el) { return [...container.children].indexOf(el); }
@@ -525,6 +659,13 @@ function onMouseUp() {
     });
   });
 
+  selectedOrder = [...container.querySelectorAll(".brick img")]
+    .map((img) => img.dataset?.src || img.src)
+    .filter(Boolean);
+  syncSelectionStyles();
+  syncSelectionBadges();
+  refreshExtremePills();
+
   if (!wasDrag) {
     showZoomForBrick(droppedBrick);
   }
@@ -533,8 +674,8 @@ function onMouseUp() {
 }
 
 function clearZoomSelection() {
-  if (selectedBrick) selectedBrick.classList.remove("selected");
-  selectedBrick = null;
+  if (zoomedBrick) zoomedBrick.classList.remove("zoomed");
+  zoomedBrick = null;
   if (zoomImg) {
     zoomImg.removeAttribute("src");
     zoomImg.removeAttribute("data-src");
@@ -548,11 +689,11 @@ function showZoomForBrick(brick) {
   const img = brick.querySelector("img");
   if (!img || !img.src) return;
 
-  if (selectedBrick && selectedBrick !== brick) {
-    selectedBrick.classList.remove("selected");
+  if (zoomedBrick && zoomedBrick !== brick) {
+    zoomedBrick.classList.remove("zoomed");
   }
-  selectedBrick = brick;
-  selectedBrick.classList.add("selected");
+  zoomedBrick = brick;
+  zoomedBrick.classList.add("zoomed");
 
   const canonical = (img.dataset && img.dataset.src) ? img.dataset.src : img.src;
   const zoomSrc = img.currentSrc || img.src;
@@ -569,6 +710,241 @@ function setTilesPerRow(N) {
   // choose a reasonable vw per tile so N tiles are visible-ish; clamp 8–18vw
   const basis = Math.max(8, Math.min(18, Math.floor(80 / Math.max(1, N))));
   document.documentElement.style.setProperty("--tile-ideal", `${basis}vw`);
+}
+
+function addExtremePills() {
+  if (!container) return;
+  const bricks = [...container.querySelectorAll(".brick")];
+  if (!bricks.length) return;
+
+  const addPill = (brick, label, side) => {
+    if (!brick) return;
+    const pill = document.createElement("div");
+    pill.className = `extreme-pill ${side}`;
+    pill.textContent = label;
+    brick.appendChild(pill);
+  };
+
+  addPill(bricks[0], "Most Similar", "left");
+  if (bricks.length > 1) {
+    addPill(bricks[bricks.length - 1], "Least Similar", "right");
+  }
+}
+
+function refreshExtremePills() {
+  if (!container) return;
+  container.querySelectorAll(".extreme-pill").forEach((pill) => pill.remove());
+  addExtremePills();
+}
+
+function renderGrid({ showLoading = false } = {}) {
+  if (!gridContainer) return;
+  gridContainer.innerHTML = "";
+  const list = Array.isArray(candidates) ? candidates : [];
+
+  for (let idx = 0; idx < list.length; idx++) {
+    const entry = list[idx];
+    const brick = document.createElement("div");
+    brick.className = "brick";
+    brick.dataset.slot = entry.slot ?? idx;
+    brick.dataset.canonical = entry.canonical;
+    brick.title = "Right-click to select/deselect";
+
+    const img = document.createElement("img");
+    img.alt = "";
+    img.dataset.basename = entry.basename || entry.canonical.split("/").pop();
+    img.dataset.src = entry.canonical;
+    img.src = `${entry.canonical}?v=${Date.now()}`;
+    brick.appendChild(img);
+
+    if (showLoading || !entry.loaded) {
+      const overlay = document.createElement("div");
+      overlay.className = "loading";
+      overlay.innerHTML = `<div class="loading-wrap"><div class="spinner"></div><div class="label">Generating…</div></div>`;
+      brick.appendChild(overlay);
+    }
+
+    let safetyState = entry.isSafe;
+    if (safetyState === undefined || safetyState === null) {
+      safetyState = safetyIndex.has(entry.canonical) ? safetyIndex.get(entry.canonical) : null;
+    }
+    rememberImageSafety(entry.canonical, safetyState);
+    applySafetyOverlay(brick, safetyState);
+    if (selectedOrder.includes(entry.canonical)) {
+      brick.classList.add("selected");
+    }
+
+    gridContainer.appendChild(brick);
+  }
+
+  if (gridSection) {
+    gridSection.classList.toggle("hidden", !list.length);
+  }
+
+  syncSelectionBadges();
+}
+
+function renderRankingFromSelection({ showLoading = false } = {}) {
+  if (!container) return 0;
+  container.innerHTML = "";
+  const canonicalSet = new Set((candidates || []).map((c) => c.canonical));
+  selectedOrder = selectedOrder.filter((c) => canonicalSet.has(c));
+  clampSelectionToLimit();
+
+  let rendered = 0;
+  for (const canonical of selectedOrder) {
+    const entry = getCandidateByCanonical(canonical);
+    if (!entry) continue;
+
+    const brick = document.createElement("div");
+    brick.className = "brick";
+    brick.dataset.canonical = entry.canonical;
+    brick.dataset.slot = entry.slot ?? rendered;
+
+    const img = document.createElement("img");
+    img.alt = "";
+    img.dataset.basename = entry.basename || entry.canonical.split("/").pop();
+    img.dataset.src = entry.canonical;
+    img.src = `${entry.canonical}?v=${Date.now()}`;
+    brick.appendChild(img);
+
+    if (showLoading || !entry.loaded) {
+      const overlay = document.createElement("div");
+      overlay.className = "loading";
+      overlay.innerHTML = `<div class="loading-wrap"><div class="spinner"></div><div class="label">Generating…</div></div>`;
+      brick.appendChild(overlay);
+    }
+
+    let safetyState = entry.isSafe;
+    if (safetyState === undefined || safetyState === null) {
+      safetyState = safetyIndex.has(entry.canonical) ? safetyIndex.get(entry.canonical) : null;
+    }
+    rememberImageSafety(entry.canonical, safetyState);
+    applySafetyOverlay(brick, safetyState);
+
+    container.appendChild(brick);
+    rendered += 1;
+  }
+
+  if (rendered > 0) {
+    refreshExtremePills();
+  }
+
+  if (rendered === 0) {
+    const placeholder = document.createElement("div");
+    placeholder.className = "rank-placeholder";
+    const limit = topK && topK > 0 ? topK : null;
+    placeholder.textContent = limit ? `Select top ${limit} images` : "Select images to rank";
+    container.appendChild(placeholder);
+  }
+
+  if (rankSection) rankSection.classList.remove("hidden");
+  if (nextWrap) nextWrap.classList.remove("hidden");
+  setTilesPerRow(rendered || 6);
+  syncSafetyOverlays();
+  syncSelectionStyles();
+  syncSelectionBadges();
+  updateActionButtons();
+
+  const currentZoom = zoomImg?.dataset?.src || null;
+  const zoomTarget = currentZoom && selectedOrder.includes(currentZoom)
+    ? currentZoom
+    : (selectedOrder.length ? selectedOrder[0] : null);
+  if (zoomTarget) {
+    setZoomByCanonical(zoomTarget);
+  } else {
+    clearZoomSelection();
+  }
+
+  return rendered;
+}
+
+function syncSelectionStyles() {
+  const selectedSet = new Set(selectedOrder);
+  if (gridContainer) {
+    gridContainer.querySelectorAll(".brick").forEach((brick) => {
+      const canonical = brick.dataset?.canonical;
+      brick.classList.toggle("selected", selectedSet.has(canonical));
+    });
+  }
+}
+
+function syncSelectionBadges() {
+  const rankByCanonical = new Map();
+  selectedOrder.forEach((canonical, idx) => {
+    rankByCanonical.set(canonical, idx + 1);
+  });
+
+  if (gridContainer) {
+    gridContainer.querySelectorAll(".brick").forEach((brick) => {
+      const canonical = brick.dataset?.canonical;
+      const rank = rankByCanonical.get(canonical);
+      let badge = brick.querySelector(".selection-rank-badge");
+      if (rank) {
+        if (!badge) {
+          badge = document.createElement("div");
+          badge.className = "selection-rank-badge";
+          brick.appendChild(badge);
+        }
+        badge.textContent = rank;
+      } else if (badge) {
+        badge.remove();
+      }
+    });
+  }
+
+  if (container) {
+    container.querySelectorAll(".brick").forEach((brick) => {
+      const canonical = brick.dataset?.canonical;
+      const rank = rankByCanonical.get(canonical);
+      let badge = brick.querySelector(".rank-number-badge");
+      if (rank) {
+        if (!badge) {
+          badge = document.createElement("div");
+          badge.className = "rank-number-badge";
+          brick.appendChild(badge);
+        }
+        badge.textContent = rank;
+      } else if (badge) {
+        badge.remove();
+      }
+    });
+  }
+}
+
+function toggleSelection(canonical) {
+  if (!canonical) return;
+  const limit = topK && topK > 0 ? topK : candidates.length;
+  const isSelected = selectedOrder.includes(canonical);
+
+  if (isSelected) {
+    selectedOrder = selectedOrder.filter((c) => c !== canonical);
+  } else {
+    if (selectedOrder.length >= limit) {
+      if (statusEl) statusEl.textContent = `Select up to ${limit} images to rank.`;
+      return;
+    }
+    selectedOrder.push(canonical);
+  }
+
+  renderRankingFromSelection();
+  syncSelectionStyles();
+  syncSelectionBadges();
+  updateActionButtons();
+}
+
+function setZoomByCanonical(canonical) {
+  if (!canonical) {
+    clearZoomSelection();
+    return;
+  }
+  const bricks = [];
+  if (container) bricks.push(...container.querySelectorAll(".brick"));
+  if (gridContainer) bricks.push(...gridContainer.querySelectorAll(".brick"));
+  const target = bricks.find((b) => (b.dataset?.canonical || b.dataset?.src) === canonical);
+  if (target) {
+    showZoomForBrick(target);
+  }
 }
 
 // ---------- demographics gating ----------
@@ -654,6 +1030,10 @@ async function startProcess() {
     const resp = await fetch("/api/start", { method: "POST" });
     if (!resp.ok) throw new Error("start failed");
     const data = await resp.json();
+    if (data.top_k !== undefined) {
+      setTopKValue(data.top_k);
+    }
+    updateRankMidLabel();
     if (data.stage) {
       applyStagePayload(data.stage);
     } else {
@@ -682,103 +1062,148 @@ if (startBtn) startBtn.addEventListener("click", handleStartClick);
 
 // ---------- placeholders + per-slot reveal ----------
 function renderPlaceholders(n) {
-  container.innerHTML = "";
-  clearZoomSelection();
-  container.style.display = "flex";
-  container.style.gap = "12px";
-  container.style.overflowX = "auto";
-
+  candidates = [];
   for (let i = 0; i < n; i++) {
-    const brick = document.createElement("div");
-    brick.className = "brick";
-    brick.dataset.slot = String(i);
-
-    const img = new Image();
-    img.alt = "";
-    img.dataset.basename = `slot-${i}.png`;
-    img.dataset.src = `${SLOTS_BASE}/slot-${i}.png`;
-    safetyIndex.delete(img.dataset.src);
-    brick.appendChild(img);
-
-    const overlay = document.createElement("div");
-    overlay.className = "loading";
-    overlay.innerHTML = `<div class="loading-wrap"><div class="spinner"></div><div class="label">Generating…</div></div>`;
-    brick.appendChild(overlay);
-
-    container.appendChild(brick);
+    const canonical = `${SLOTS_BASE}/slot-${i}.png`;
+    candidates.push({
+      slot: i,
+      canonical,
+      basename: `slot-${i}.png`,
+      isSafe: null,
+      loaded: false,
+    });
+    safetyIndex.delete(canonical);
   }
+  resetSelectionToCandidateOrder();
+  renderGrid({ showLoading: true });
+  renderRankingFromSelection({ showLoading: true });
 }
 
-function renderImageList(images) {
+function slotIndexFromCanonical(canonical) {
+  if (typeof canonical !== "string") return null;
+  const match = canonical.match(/slot-(\d+)/);
+  if (!match) return null;
+  const idx = Number(match[1]);
+  return Number.isFinite(idx) ? idx : null;
+}
+
+function renderImageList(images, options = {}) {
   if (!container) return 0;
   const list = Array.isArray(images) ? images : [];
+  const preserveSelection = Boolean(options.preserveSelection);
+  const expectedCount = Number.isFinite(options.expectedCount) ? Math.max(0, options.expectedCount) : null;
+  const prevSelected = preserveSelection ? [...selectedOrder] : [];
+  const prevZoom = preserveSelection ? (zoomImg?.dataset?.src || null) : null;
 
-  container.innerHTML = "";
-  clearZoomSelection();
-  container.style.display = "flex";
-  container.style.flexDirection = "row";
-  container.style.flexWrap = "nowrap";
-  container.style.gap = "12px";
-  container.style.overflowX = "auto";
-
-  let rendered = 0;
-  for (const entry of list) {
+  const normalizedList = [];
+  list.forEach((entry, idx) => {
     const normalized = normalizeImageEntry(entry);
     const canonical = normalized?.canonical || canonicalizeImageSrc(normalized?.url);
-    if (!canonical) continue;
+    if (!canonical) return;
+    const slot = slotIndexFromCanonical(canonical);
+    normalizedList.push({ ...normalized, canonical, slot: Number.isFinite(slot) ? slot : idx });
+  });
 
-    const div = document.createElement("div");
-    div.className = "brick";
-    const img = document.createElement("img");
-
-    img.src = `${canonical}?v=${Date.now()}`;
-    img.alt = "";
-    img.style.maxWidth = "100%";
-    img.style.display = "block";
-    img.dataset.basename = canonical.split("/").pop();
-    img.dataset.src = canonical;
-
-    rememberImageSafety(canonical, normalized.isSafe);
-    applySafetyOverlay(div, normalized.isSafe);
-
-    div.appendChild(img);
-    container.appendChild(div);
-    rendered += 1;
+  let targetCount = normalizedList.length;
+  if (expectedCount !== null) {
+    targetCount = Math.max(targetCount, expectedCount);
   }
 
-  if (rankSection) rankSection.classList.remove("hidden");
-  if (nextWrap) nextWrap.classList.remove("hidden");
+  const nextCandidates = [];
+  const ensureSlot = (idx) => {
+    while (nextCandidates.length <= idx) {
+      const i = nextCandidates.length;
+      nextCandidates.push({
+        slot: i,
+        canonical: `${SLOTS_BASE}/slot-${i}.png`,
+        basename: `slot-${i}.png`,
+        isSafe: null,
+        loaded: false,
+      });
+    }
+  };
 
-  setTilesPerRow(rendered || 6);
-  syncSafetyOverlays();
-  return rendered;
+  normalizedList.forEach((normalized, idx) => {
+    const slot = Number.isFinite(normalized.slot) ? normalized.slot : idx;
+    ensureSlot(slot);
+    nextCandidates[slot] = {
+      slot,
+      canonical: normalized.canonical,
+      basename: normalized.canonical.split("/").pop(),
+      isSafe: normalized.isSafe,
+      loaded: true,
+    };
+  });
+
+  for (let i = 0; i < targetCount; i++) {
+    ensureSlot(i);
+  }
+
+  candidates = nextCandidates;
+
+  if (preserveSelection) {
+    const validCanonicals = new Set(candidates.map((c) => c.canonical));
+    selectedOrder = prevSelected.filter((c) => validCanonicals.has(c));
+    clampSelectionToLimit();
+  } else {
+    resetSelectionToCandidateOrder();
+  }
+
+  renderGrid({ showLoading: false });
+  const rendered = renderRankingFromSelection({ showLoading: false });
+  syncSelectionStyles();
+
+  if (preserveSelection && prevZoom) {
+    setZoomByCanonical(prevZoom);
+  }
+
+  return Math.max(targetCount, rendered);
 }
 
 async function setSlotImage(slot, round) {
-  const brick = container.querySelector(`.brick[data-slot="${slot}"]`);
-  if (!brick) return;
-  const img = brick.querySelector("img");
-  const overlay = brick.querySelector(".loading");
-
   const canonical = `${SLOTS_BASE}/slot-${slot}.png`;
-  img.dataset.basename = `slot-${slot}.png`;
-  img.dataset.src = canonical;
-  markImageSafetyUnknown(canonical, brick);
-  img.src = `${canonical}?v=${round}&t=${Date.now()}`;
-
-  if (img.decode) { try { await img.decode(); } catch { } }
-  overlay.style.display = "none";
-
-  let safetyState = true;
-  if (canonical) {
-    safetyState = safetyIndex.has(canonical) ? safetyIndex.get(canonical) : null;
+  const entry = getCandidateBySlot(slot);
+  if (entry) {
+    entry.canonical = canonical;
+    entry.basename = `slot-${slot}.png`;
+    entry.loaded = true;
   }
-  applySafetyOverlay(brick, safetyState);
+
+  const bricks = [];
+  if (gridContainer) {
+    const gridBrick = gridContainer.querySelector(`.brick[data-slot="${slot}"]`);
+    if (gridBrick) bricks.push(gridBrick);
+  }
+  if (container) {
+    const rankBrick = container.querySelector(`.brick[data-slot="${slot}"]`);
+    if (rankBrick) bricks.push(rankBrick);
+  }
+
+  for (const brick of bricks) {
+    const img = brick.querySelector("img");
+    const overlay = brick.querySelector(".loading");
+    if (!img) continue;
+
+    img.dataset.basename = `slot-${slot}.png`;
+    img.dataset.src = canonical;
+    markImageSafetyUnknown(canonical, brick);
+    img.src = `${canonical}?v=${round}&t=${Date.now()}`;
+
+    if (img.decode) { try { await img.decode(); } catch { } }
+    if (overlay) overlay.style.display = "none";
+
+    let safetyState = true;
+    if (canonical) {
+      safetyState = safetyIndex.has(canonical) ? safetyIndex.get(canonical) : null;
+    }
+    if (entry && safetyState !== undefined) {
+      entry.isSafe = safetyState;
+    }
+    applySafetyOverlay(brick, safetyState);
+  }
+
   refreshSafetyFromServer();
-
-  if (selectedBrick === brick) {
-    showZoomForBrick(brick);
-  }
+  setZoomByCanonical(zoomImg?.dataset?.src || null);
 }
 
 // ---------- SSE (push) ----------
@@ -854,6 +1279,10 @@ es.onerror = () => {
 es.addEventListener("stage", (ev) => {
   try {
     const payload = JSON.parse(ev.data);
+    if (payload && payload.top_k !== undefined) {
+      setTopKValue(payload.top_k);
+    }
+    updateRankMidLabel();
     if (payload && payload.stage) {
       applyStagePayload(payload.stage);
     }
@@ -870,11 +1299,38 @@ async function refreshStageStatus() {
     const resp = await fetch("/api/stage/status");
     if (!resp.ok) return;
     const data = await resp.json();
+    if (data.top_k !== undefined) {
+      setTopKValue(data.top_k);
+    }
+    updateRankMidLabel();
     if (data && data.stage) {
       applyStagePayload(data.stage);
     }
-    if (data && Array.isArray(data.images) && data.images.length) {
-      renderImageList(data.images);
+    const serverExpected = Number.isFinite(data?.expected) ? Number(data.expected) : null;
+    if (serverExpected !== null) {
+      expected = serverExpected;
+      setTilesPerRow(expected || 6);
+    }
+
+    if (Number.isFinite(data?.round)) {
+      currentRound = Number(data.round);
+    }
+    if (Number.isFinite(data?.iteration)) {
+      setIterationDisplay(Number(data.iteration));
+    }
+
+    const imagesFromServer = Array.isArray(data?.images) ? data.images : [];
+    received = imagesFromServer.length;
+
+    const targetExpected = serverExpected ?? expected ?? imagesFromServer.length;
+
+    renderImageList(imagesFromServer, { preserveSelection: true, expectedCount: targetExpected });
+    refreshSafetyFromServer();
+
+    const inflight = Boolean(data?.inflight) || (targetExpected && received < targetExpected);
+    isGenerationInFlight = inflight;
+    if (inflight && statusEl && targetExpected) {
+      statusEl.textContent = `Loaded ${received}/${targetExpected}`;
     }
   } catch (err) {
     console.warn("stage status refresh failed", err);
@@ -882,6 +1338,31 @@ async function refreshStageStatus() {
 }
 
 refreshStageStatus();
+
+async function handleUiRefresh() {
+  if (!refreshUiBtn) return;
+  if (refreshUiBtn.disabled) return;
+  refreshUiBtn.disabled = true;
+  const prevStatus = statusEl ? statusEl.textContent : "";
+  if (statusEl) statusEl.textContent = "Refreshing images…";
+  try {
+    await refreshStageStatus();
+    if (statusEl) statusEl.textContent = "Refresh requested. Reloading images…";
+  } catch (err) {
+    if (statusEl) statusEl.textContent = "Refresh failed. Please try again.";
+  } finally {
+    refreshUiBtn.disabled = false;
+    setTimeout(() => {
+      if (statusEl && statusEl.textContent && statusEl.textContent.startsWith("Refresh")) {
+        statusEl.textContent = prevStatus;
+      }
+    }, 1800);
+  }
+}
+
+if (refreshUiBtn) {
+  refreshUiBtn.addEventListener("click", handleUiRefresh);
+}
 
 // ---------- ranking ----------
 function getRanking() {
@@ -895,6 +1376,10 @@ function getRanking() {
   return order;
 }
 
+function getAllBasenames() {
+  return (candidates || []).map((c) => c.basename || (c.canonical ? c.canonical.split("/").pop() : null)).filter(Boolean);
+}
+
 // ---------- Next button ----------
 
 if (nextBtn) {
@@ -905,6 +1390,12 @@ if (nextBtn) {
       return;
     }
     const order = getRanking();
+    const allBasenamesSnapshot = getAllBasenames();
+    const required = topK && topK > 0 ? topK : order.length;
+    if (required && order.length < required) {
+      statusEl.textContent = `Select ${required} images to rank.`;
+      return;
+    }
     isGenerationInFlight = true;
     updateActionButtons();
     statusEl.textContent = "Starting…";
@@ -921,7 +1412,7 @@ if (nextBtn) {
       const resp = await fetch("/api/next", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ranking: order })
+        body: JSON.stringify({ ranking: order, all_basenames: allBasenamesSnapshot })
       });
       if (!resp.ok) {
         throw new Error("Next failed.");
@@ -942,6 +1433,12 @@ if (stageBtn) {
     stageBtn.disabled = true;
     if (statusEl) statusEl.textContent = "Loading next images…";
     const order = getRanking();
+    const required = topK && topK > 0 ? topK : order.length;
+    if (required && order.length < required) {
+      if (statusEl) statusEl.textContent = `Select ${required} images to rank.`;
+      stageBtn.disabled = false;
+      return;
+    }
     try {
       const resp = await fetch("/api/stage/next", {
         method: "POST",
@@ -953,6 +1450,9 @@ if (stageBtn) {
         data = await resp.json();
       } catch {
         data = {};
+      }
+      if (data && data.top_k !== undefined) {
+        setTopKValue(data.top_k);
       }
       if (data && data.stage) {
         applyStagePayload(data.stage);

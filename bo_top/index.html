@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="stylesheet" href=/static/style.css>
-  <script src="/static/script.js" defer></script>
+  <link rel="stylesheet" href=/static/style_bo_top.css>
+  <script src="/static/script_bo_top.js" defer></script>
 </head>
 <body>
   <div id=source>
@@ -45,11 +45,7 @@
   </div>
 
   <div id="rankSection" class="hidden">
-    <div class="rank-labels">
-      <span class="rank-label rank-label-left">Closest</span>
-        <span id="rankMidLabel" class="rank-label rank-label-mid"></span>
-      <span class="rank-label rank-label-right">Farthest</span>
-    </div>
+      <div class="rank-labels"><span id="rankMidLabel" class="rank-direction">Drag images left/right</span></div>
     <div id="container"></div>
   </div>
 
@@ -139,6 +135,7 @@
 
   <button id="descriptionToggle" class="description-button" type="button">Task Description</button>
   <button id="tutorialToggle" class="tutorial-button" type="button">Tutorial</button>
+  <button id="refreshUiBtn" class="refresh-button" type="button" aria-label="Refresh images">Refresh Images</button>
   <div id="descriptionOverlay" class="description-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="descriptionTitle">
     <div class="description-content">
       <div class="description-header">
