@@ -947,18 +947,6 @@ class Engine:
         self._archive_current_train_dataset(
             reason=f"stage-{self.stage_index}-complete")
 
-        if ranking_basenames:
-            self.ranking_history.append({
-                "event": "stage-advance",
-                "stage_index": int(self.stage_index),
-                "step": int(self.step),
-                "round": None,
-                "ranking": list(ranking_basenames),
-                "indices": [],
-                "selected": getattr(self, "last_selected_basename", None),
-                "saved_at": time.time(),
-                "train_version": int(self.train_dataset_version),
-            })
         self._begin_new_train_dataset_version()
 
         self.stage_index += 1
@@ -975,6 +963,19 @@ class Engine:
                 if rec is None:
                     continue
                 ranked_indices.append(int(rec[1]))
+        if ranking_basenames:
+            self.ranking_history.append({
+                "event": "stage-advance",
+                "stage_index": int(self.stage_index),
+                "step": int(self.step),
+                "round": None,
+                "ranking": list(ranking_basenames),
+                "indices": ranked_indices,
+                "new_y": [float(self.Y[i].item()) if self.Y is not None and i < self.Y.shape[0] else None for i in ranked_indices],
+                "selected": getattr(self, "last_selected_basename", None),
+                "saved_at": time.time(),
+                "train_version": int(self.train_dataset_version),
+            })
 
         best_idx: int | None = ranked_indices[0] if ranked_indices else None
         self.comp_pairs = torch.empty((0, 2), dtype=torch.long, device=device)

@@ -137,7 +137,8 @@ if _env_state_override:
 
 _env_state_save_override = os.environ.get("ENGINE_STATE_SAVE_DIR_OVERRIDE")
 if not _env_state_save_override:
-    _env_state_save_override = os.environ.get("ENGINE_STATE_SAVE_PATH_OVERRIDE")
+    _env_state_save_override = os.environ.get(
+        "ENGINE_STATE_SAVE_PATH_OVERRIDE")
     if _env_state_save_override:
         print("[env] ENGINE_STATE_SAVE_PATH_OVERRIDE is deprecated; use ENGINE_STATE_SAVE_DIR_OVERRIDE.")
 if _env_state_save_override:
@@ -165,7 +166,8 @@ if _env_demo_participant:
     DEMO_PARTICIPANT_ID = _env_demo_participant
     DEMO_ENABLED = True
 if _env_precompute_enabled:
-    PRECOMPUTE_ENABLED = str(_env_precompute_enabled).lower() in {"1", "true", "yes", "on"}
+    PRECOMPUTE_ENABLED = str(_env_precompute_enabled).lower() in {
+        "1", "true", "yes", "on"}
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -605,7 +607,7 @@ class Engine:
             return False
 
     def _build_worker_payload(self, x_vector: np.ndarray, *, output_dir: str | None = None,
-                               is_init: bool = False) -> dict:
+                              is_init: bool = False) -> dict:
         lora_dim = len(self.component_weights)
         w_full = np.zeros(lora_dim)
         # Scale each LoRA by its parent dimension's scalar weight
@@ -866,18 +868,6 @@ class Engine:
         self._archive_current_train_dataset(
             reason=f"stage-{self.stage_index}-complete")
 
-        if ranking_basenames:
-            self.ranking_history.append({
-                "event": "stage-advance",
-                "stage_index": int(self.stage_index),
-                "step": int(self.step),
-                "round": None,
-                "ranking": list(ranking_basenames),
-                "indices": [],
-                "selected": getattr(self, "last_selected_basename", None),
-                "saved_at": time.time(),
-                "train_version": int(self.train_dataset_version),
-            })
         self._begin_new_train_dataset_version()
 
         self.stage_index += 1
@@ -894,6 +884,19 @@ class Engine:
                 if rec is None:
                     continue
                 ranked_indices.append(int(rec[1]))
+        if ranking_basenames:
+            self.ranking_history.append({
+                "event": "stage-advance",
+                "stage_index": int(self.stage_index),
+                "step": int(self.step),
+                "round": None,
+                "ranking": list(ranking_basenames),
+                "indices": ranked_indices,
+                "new_y": [float(self.Y[i].item()) if self.Y is not None and i < self.Y.shape[0] else None for i in ranked_indices],
+                "selected": getattr(self, "last_selected_basename", None),
+                "saved_at": time.time(),
+                "train_version": int(self.train_dataset_version),
+            })
 
         best_idx: int | None = ranked_indices[0] if ranked_indices else None
         self.comp_pairs = torch.empty((0, 2), dtype=torch.long, device=device)
