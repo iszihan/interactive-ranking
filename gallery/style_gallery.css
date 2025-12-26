@@ -188,6 +188,34 @@ body.no-scroll{ overflow: hidden; }
   z-index: 3;
 }
 
+/* Centered hover zoom preview */
+.hover-zoom-overlay{
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(80vw, 80vh, 1024px);
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 32px 90px rgba(10, 12, 32, 0.38);
+  padding: 16px;
+  z-index: 3000;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+.hover-zoom-overlay.hidden{
+  opacity: 0;
+  visibility: hidden;
+}
+.hover-zoom-overlay img{
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: min(80vh, 1024px);
+  border-radius: 12px;
+  object-fit: contain;
+}
+
 .zoom-safety-overlay.hidden{
   display: none;
 }
@@ -322,13 +350,13 @@ body.no-scroll{ overflow: hidden; }
 .loading-wrap{ display: grid; justify-items: center; row-gap: .5rem; text-align: center; }
 
 .brick.nsfw-flagged img{
-  filter: blur(14px) saturate(0.7);
-  transform: scale(1.04);
+  filter: blur(18px) saturate(0.6);
+  transform: scale(1.045);
   transition: filter 0.2s ease, transform 0.2s ease;
 }
 .brick.nsfw-pending img{
-  filter: blur(14px) saturate(0.7);
-  transform: scale(1.02);
+  filter: blur(16px) saturate(0.65);
+  transform: scale(1.03);
   transition: filter 0.2s ease, transform 0.2s ease;
 }
 
@@ -336,8 +364,8 @@ body.no-scroll{ overflow: hidden; }
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  background: rgba(8, 11, 27, 0.55);
-  backdrop-filter: blur(12px);
+  background: rgba(8, 11, 27, 0.68);
+  backdrop-filter: blur(14px);
   color: #fff;
   font-size: 0.78rem;
   font-weight: 600;

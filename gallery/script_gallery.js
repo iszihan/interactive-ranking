@@ -50,6 +50,53 @@ let demographicsParticipantId = null;
 let demographicsSubmitted = false;
 let demographicsConfigLoaded = false;
 
+function createCenterHoverZoom({ allowShow } = {}) {
+  const overlay = document.createElement("div");
+  overlay.className = "hover-zoom-overlay hidden";
+  const overlayImg = document.createElement("img");
+  overlay.append(overlayImg);
+  document.body.append(overlay);
+
+  const show = (imgEl) => {
+    if (!imgEl) return;
+    if (typeof allowShow === "function" && !allowShow(imgEl)) {
+      hide();
+      return;
+    }
+    const src = imgEl.currentSrc || imgEl.src;
+    if (!src) return;
+    overlayImg.src = src;
+    overlayImg.alt = imgEl.alt || "";
+    overlay.classList.remove("hidden");
+  };
+
+  const hide = () => overlay.classList.add("hidden");
+
+  const attach = (imgEl) => {
+    if (!imgEl) return;
+    imgEl.addEventListener("mouseenter", () => show(imgEl));
+    imgEl.addEventListener("mouseleave", hide);
+    imgEl.addEventListener("focus", () => show(imgEl));
+    imgEl.addEventListener("blur", hide);
+  };
+
+  return { attach, hide };
+}
+
+function isHoverZoomAllowed(imgEl) {
+  if (!imgEl) return false;
+  const unsafeAncestor = imgEl.closest(".nsfw-flagged, .nsfw-pending");
+  if (unsafeAncestor) return false;
+  const canonical = canonicalizeImageSrc(imgEl.dataset?.src || imgEl.currentSrc || imgEl.src);
+  if (!canonical) return true;
+  const state = safetyIndex.has(canonical) ? safetyIndex.get(canonical) : null;
+  return state !== false;
+}
+
+const hoverZoom = createCenterHoverZoom({ allowShow: isHoverZoomAllowed });
+hoverZoom.attach(referenceImg);
+hoverZoom.attach(zoomImg);
+
 function setBodyScrollLock(locked) {
   document.body.classList.toggle("no-scroll", Boolean(locked));
 }
