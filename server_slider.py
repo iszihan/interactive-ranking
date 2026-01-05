@@ -214,6 +214,7 @@ class Engine:
         self._pool_warmed = False
 
         self._reset_runtime_state()
+        self.completion_finalized: bool = False
 
         # Read config_path (yml)
         with open(self.config_path, 'r') as f:
@@ -239,6 +240,7 @@ class Engine:
         self.init_dir = config.get('init_dir', None)
         self.seed = config.get('seed', 0)
         self.gt_config = config.get('gt_config', '')
+        self.max_num_observations = config.get('max_num_observations', 0)
 
         self.use_sdxl = True
         self.negative_prompt = config.get('negative_prompt', '')
@@ -402,6 +404,68 @@ class Engine:
         self.last_round_context: dict | None = None
         self.slider_history: list[dict] = []
         self.init_ready_timestamp: float | None = None
+        self.completion_finalized = False
+
+    def _normalized_max_iterations(self) -> int | None:
+        try:
+            max_iters = int(getattr(self, "max_num_observations", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        return max_iters if max_iters > 0 else None
+
+    def _iterations_completed(self) -> int:
+        try:
+            return max(0, int(self.get_slider_iteration()))
+        except (TypeError, ValueError):
+            return 0
+
+    def _completion_save_path(self) -> Path | None:
+        if not self.save_state_dir:
+            return None
+        directory = Path(self.save_state_dir)
+        stem = directory.name or "state"
+        return directory / f"{stem}_final.json"
+
+    def completion_status(self) -> dict:
+        max_iters = self._normalized_max_iterations()
+        current = self._iterations_completed()
+        if max_iters is None:
+            remaining = None
+            complete = False
+        else:
+            remaining = max(0, max_iters - current)
+            complete = remaining == 0
+        final_path = None
+        if self.completion_finalized:
+            target = self._completion_save_path()
+            if target is not None:
+                final_path = str(target)
+        return {
+            "maxIterations": max_iters,
+            "currentIteration": current,
+            "remainingIterations": remaining,
+            "complete": complete,
+            "finalized": bool(self.completion_finalized),
+            "finalStatePath": final_path,
+        }
+
+    def has_iterations_remaining(self) -> bool:
+        status = self.completion_status()
+        if status["maxIterations"] is None:
+            return True
+        return not status["complete"]
+
+    def ensure_completion_saved(self) -> Path | None:
+        if self.completion_finalized:
+            return self._completion_save_path()
+        target = self._completion_save_path()
+        saved = None
+        if target is not None:
+            saved = _save_slider_checkpoint(self, reason="complete", save_dir=target, force=True)
+        else:
+            print("No save-state dir configured; skipping completion save.")
+        self.completion_finalized = True
+        return saved
 
     def _make_worker_state_template(self) -> dict:
         return {
@@ -664,6 +728,7 @@ class Engine:
     def start(self) -> None:
         self.step = 0
         self._reset_runtime_state()
+        self.completion_finalized = False
 
         restored = False
         if self.autoload_state:
@@ -783,6 +848,7 @@ class Engine:
         if autosave:
             _save_slider_checkpoint(self, reason="slider-eval")
         payload["iteration"] = self.get_slider_iteration()
+        payload["completion"] = self.completion_status()
         return payload
 
 
@@ -1104,6 +1170,7 @@ def start() -> JSONResponse:
         "slider": slider_meta,
         "latest_image": latest_image,
         "history": history_payload,
+        "completion": eng.completion_status(),
     }, headers={"Cache-Control": "no-store"})
 
 
@@ -1131,6 +1198,7 @@ def slider_status() -> JSONResponse:
         "slider": slider_meta,
         "latest_image": latest_image,
         "history": history_payload,
+        "completion": eng.completion_status(),
     }, headers={"Cache-Control": "no-store"})
 
 
@@ -1188,6 +1256,15 @@ def extract_basename(s: str) -> str | None:
 @app.post("/api/slider/eval")
 async def api_slider_eval(req: SliderEvalRequest) -> JSONResponse:
     eng = _require_engine()
+    completion = eng.completion_status()
+    if completion.get("complete"):
+        saved_path = eng.ensure_completion_saved()
+        completion = eng.completion_status()
+        return JSONResponse({
+            "complete": True,
+            "completion": completion,
+            "final_state_path": str(saved_path) if saved_path else None,
+        }, headers={"Cache-Control": "no-store"})
     if eng.gpu_pool and not eng._pool_warmed:
         eng._warmup_gpu_pool()
 
@@ -1202,7 +1279,23 @@ async def api_slider_eval(req: SliderEvalRequest) -> JSONResponse:
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
+    result.setdefault("completion", eng.completion_status())
     return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/complete")
+def api_complete() -> JSONResponse:
+    eng = _require_engine()
+    completion = eng.completion_status()
+    saved_path = None
+    if completion.get("complete"):
+        saved_path = eng.ensure_completion_saved()
+        completion = eng.completion_status()
+    return JSONResponse({
+        "complete": completion.get("complete"),
+        "completion": completion,
+        "final_state_path": str(saved_path) if saved_path else None,
+    }, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/slider/history")

@@ -292,6 +292,7 @@ class Engine:
         self._pool_warmed = False
 
         self._reset_runtime_state()
+        self.completion_finalized: bool = False
 
         # Read config_path (yml)
         with open(self.config_path, 'r') as f:
@@ -504,6 +505,7 @@ class Engine:
         self.ranking_history: list[dict] = []
         self.last_round_context: dict | None = None
         self.init_ready_timestamp: float | None = None
+        self.completion_finalized = False
 
     def _archive_current_train_dataset(self, reason: str | None = None) -> None:
         """Persist the active train_X/Y tensors before rebuilding them."""
@@ -564,10 +566,72 @@ class Engine:
             "hasStages": has_stages,
         }
 
+    def _normalized_max_iterations(self) -> int | None:
+        try:
+            max_iters = int(getattr(self, "max_num_observations", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        return max_iters if max_iters > 0 else None
+
+    def _iterations_completed(self) -> int:
+        try:
+            return max(0, int(getattr(self, "step", 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _completion_save_path(self) -> Path | None:
+        if not self.save_state_dir:
+            return None
+        directory = Path(self.save_state_dir)
+        stem = directory.name or "state"
+        return directory / f"{stem}_final.json"
+
+    def completion_status(self) -> dict:
+        max_iters = self._normalized_max_iterations()
+        current = self._iterations_completed()
+        if max_iters is None:
+            remaining = None
+            complete = False
+        else:
+            remaining = max(0, max_iters - current)
+            complete = remaining == 0
+        final_path = None
+        if self.completion_finalized:
+            target = self._completion_save_path()
+            if target is not None:
+                final_path = str(target)
+        return {
+            "maxIterations": max_iters,
+            "currentIteration": current,
+            "remainingIterations": remaining,
+            "complete": complete,
+            "finalized": bool(self.completion_finalized),
+            "finalStatePath": final_path,
+        }
+
+    def has_iterations_remaining(self) -> bool:
+        status = self.completion_status()
+        if status["maxIterations"] is None:
+            return True
+        return not status["complete"]
+
+    def ensure_completion_saved(self) -> Path | None:
+        if self.completion_finalized:
+            return self._completion_save_path()
+        target = self._completion_save_path()
+        saved = None
+        if target is not None:
+            saved = self.save_state(reason="complete", save_dir=target, force=True)
+        else:
+            print("No save-state dir configured; skipping completion save.")
+        self.completion_finalized = True
+        return saved
+
     async def emit_stage_update(self) -> None:
         await self._events.put(("stage", {
             "stage": self.stage_status(),
             "images": _list_image_urls(),
+            "completion": self.completion_status(),
         }))
 
     def _make_worker_state_template(self) -> dict:
@@ -866,6 +930,7 @@ class Engine:
         self.cur_step = 0
         self.last_selected_basename = None
         self._reset_runtime_state()
+        self.completion_finalized = False
 
         restored = False
         if self.autoload_state:
@@ -1605,6 +1670,7 @@ class Engine:
             "ranking_prompt": _ranking_prompt(getattr(self, "top_k", None)),
             "selected": None,
             "accepted_ranking": [],
+            "completion": self.completion_status(),
         }))
 
         # Iterate and generate each slot given new_x
@@ -1643,6 +1709,7 @@ class Engine:
             "round": round_id,
             "iteration": int(iteration),
             "stage": self.stage_status(),
+            "completion": self.completion_status(),
         }))
 
 
@@ -1858,6 +1925,7 @@ def start() -> JSONResponse:
                 "accepted_ranking": [],
                 "selected_basename": None,
                 "stage": eng.stage_status(),
+                "completion": eng.completion_status(),
             }, headers={"Cache-Control": "no-store"})
         time.sleep(0.2)  # small sleep to avoid busy-wait
 
@@ -1872,6 +1940,7 @@ def start() -> JSONResponse:
         "accepted_ranking": [],
         "selected_basename": None,
         "stage": eng.stage_status(),
+        "completion": eng.completion_status(),
     }, status_code=202)
 
 
@@ -1911,6 +1980,15 @@ def _ranking_prompt(top_k: int | None) -> str | None:
 @app.post("/api/next")
 async def next_step(req: NextRequest) -> JSONResponse:
     eng = _require_engine()
+    completion = eng.completion_status()
+    if completion.get("complete"):
+        saved_path = eng.ensure_completion_saved()
+        completion = eng.completion_status()
+        return JSONResponse({
+            "complete": True,
+            "completion": completion,
+            "final_state_path": str(saved_path) if saved_path else None,
+        })
     # IMPORTANT: do NOT clear the slots; optional: clear only historical outputs
     # If you want to keep a cleanup, make sure it doesn't touch SLOTS_DIR.
     # await asyncio.to_thread(engine.clear_outputs, keep_slots=True)
@@ -1948,6 +2026,7 @@ async def next_step(req: NextRequest) -> JSONResponse:
         "all_basenames": all_basenames,
         "selected_basename": getattr(eng, "last_selected_basename", None),
         "ranking_prompt": _ranking_prompt(top_k),
+        "completion": eng.completion_status(),
     })
 
 
@@ -1987,6 +2066,7 @@ async def api_stage_status() -> JSONResponse:
         "inflight": inflight,
         "round": int(round_id) if round_id is not None else None,
         "iteration": int(iteration) if iteration is not None else None,
+        "completion": eng.completion_status(),
     })
 
 
@@ -2024,12 +2104,28 @@ async def api_stage_next(req: StageAdvanceRequest) -> JSONResponse:
         "images": _list_image_urls(),
         "top_k": getattr(eng, "top_k", None),
         "ranking_prompt": _ranking_prompt(getattr(eng, "top_k", None)),
+        "completion": eng.completion_status(),
     }
     if reason:
         payload["reason"] = reason
 
     status_code = 200 if advanced else 409
     return JSONResponse(payload, status_code=status_code)
+
+
+@app.post("/api/complete")
+def api_complete() -> JSONResponse:
+    eng = _require_engine()
+    completion = eng.completion_status()
+    saved_path = None
+    if completion.get("complete"):
+        saved_path = eng.ensure_completion_saved()
+        completion = eng.completion_status()
+    return JSONResponse({
+        "complete": completion.get("complete"),
+        "completion": completion,
+        "final_state_path": str(saved_path) if saved_path else None,
+    })
 
 
 @app.get("/api/events")

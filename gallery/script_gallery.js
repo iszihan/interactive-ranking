@@ -50,6 +50,19 @@ let demographicsParticipantId = null;
 let demographicsSubmitted = false;
 let demographicsConfigLoaded = false;
 
+const completionState = {
+  maxIterations: null,
+  currentIteration: null,
+  remainingIterations: null,
+  complete: false,
+  finalized: false,
+  finalStatePath: null,
+};
+let completionOverlay = null;
+let completionOverlayClose = null;
+let completionOverlaySubtitle = null;
+let completionOverlayPath = null;
+
 function createCenterHoverZoom({ allowShow } = {}) {
   const overlay = document.createElement("div");
   overlay.className = "hover-zoom-overlay hidden";
@@ -99,6 +112,151 @@ hoverZoom.attach(zoomImg);
 
 function setBodyScrollLock(locked) {
   document.body.classList.toggle("no-scroll", Boolean(locked));
+}
+
+function shouldFinishSession() {
+  return Boolean(completionState.complete && !completionState.finalized);
+}
+
+function refreshCompletionUi() {
+  if (!statusEl) return;
+  if (completionState.finalized) {
+    statusEl.textContent = "Session completed. Thank you!";
+  } else if (shouldFinishSession() && !isGenerationInFlight) {
+    statusEl.textContent = "Maximum iterations reached. Click Finish to submit.";
+  }
+}
+
+function ensureCompletionOverlay() {
+  if (completionOverlay) return completionOverlay;
+  completionOverlay = document.createElement("div");
+  completionOverlay.id = "completionOverlay";
+  completionOverlay.className = "completion-overlay hidden";
+  completionOverlay.innerHTML = `
+    <div class="completion-card">
+      <div class="completion-body">
+        <h2>Thanks for participating!</h2>
+        <p id="completionSubtitle">Your responses have been recorded.</p>
+        <p id="completionPath" class="completion-path hidden"></p>
+        <div class="completion-actions">
+          <button type="button" id="completionClose">Close</button>
+        </div>
+      </div>
+    </div>`;
+  completionOverlayClose = completionOverlay.querySelector("#completionClose");
+  completionOverlaySubtitle = completionOverlay.querySelector("#completionSubtitle");
+  completionOverlayPath = completionOverlay.querySelector("#completionPath");
+  if (completionOverlayClose) {
+    completionOverlayClose.addEventListener("click", hideCompletionOverlay);
+  }
+  completionOverlay.addEventListener("click", (event) => {
+    if (event.target === completionOverlay) {
+      hideCompletionOverlay();
+    }
+  });
+  document.body.appendChild(completionOverlay);
+  return completionOverlay;
+}
+
+function hideCompletionOverlay() {
+  if (!completionOverlay) return;
+  completionOverlay.classList.add("hidden");
+  setBodyScrollLock(false);
+}
+
+function showCompletionOverlay(details = {}) {
+  ensureCompletionOverlay();
+  if (!completionOverlay) return;
+  const maxIters = completionState.maxIterations;
+  if (completionOverlaySubtitle) {
+    if (Number.isFinite(maxIters)) {
+      completionOverlaySubtitle.textContent = `You completed ${maxIters} iterations.`;
+    } else {
+      completionOverlaySubtitle.textContent = "You completed all assigned iterations.";
+    }
+  }
+  const finalPath = details.final_state_path || details.finalStatePath || completionState.finalStatePath;
+  if (completionOverlayPath) {
+    if (finalPath) {
+      // completionOverlayPath.textContent = `Log saved to ${finalPath}`;
+      completionOverlayPath.textContent = "";
+      completionOverlayPath.classList.remove("hidden");
+    } else {
+      completionOverlayPath.textContent = "";
+      completionOverlayPath.classList.add("hidden");
+    }
+  }
+  completionOverlay.classList.remove("hidden");
+  setBodyScrollLock(true);
+}
+
+function applyCompletionPayload(payload) {
+  if (!payload || typeof payload !== "object") return completionState;
+  const prevComplete = completionState.complete;
+  const prevFinalized = completionState.finalized;
+
+  if (Object.prototype.hasOwnProperty.call(payload, "maxIterations")) {
+    const nextMax = Number(payload.maxIterations);
+    completionState.maxIterations = Number.isFinite(nextMax) ? nextMax : null;
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "currentIteration")) {
+    const nextCurrent = Number(payload.currentIteration);
+    completionState.currentIteration = Number.isFinite(nextCurrent) ? nextCurrent : completionState.currentIteration;
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "remainingIterations")) {
+    const nextRemaining = Number(payload.remainingIterations);
+    completionState.remainingIterations = Number.isFinite(nextRemaining) ? nextRemaining : null;
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "complete")) {
+    completionState.complete = Boolean(payload.complete);
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "finalized")) {
+    completionState.finalized = Boolean(payload.finalized);
+  }
+  const finalPath = payload.final_state_path || payload.finalStatePath;
+  if (finalPath) {
+    completionState.finalStatePath = finalPath;
+  }
+
+  refreshCompletionUi();
+  updateActionButtons();
+
+  if (completionState.finalized && !prevFinalized) {
+    showCompletionOverlay(payload);
+  } else if (completionState.complete && !completionState.finalized && !prevComplete) {
+    if (statusEl && !isGenerationInFlight) {
+      statusEl.textContent = "Maximum iterations reached. Click Finish to submit.";
+    }
+  }
+  return completionState;
+}
+
+async function finalizeSession() {
+  if (completionState.finalized) {
+    showCompletionOverlay({});
+    return;
+  }
+  try {
+    if (statusEl) statusEl.textContent = "Saving final responses…";
+    const resp = await fetch("/api/complete", { method: "POST" });
+    if (!resp.ok) {
+      throw new Error("Failed to finalize session.");
+    }
+    const data = await resp.json();
+    if (data.completion) {
+      applyCompletionPayload(data.completion);
+    }
+    if (data.final_state_path) {
+      completionState.finalStatePath = data.final_state_path;
+    }
+    completionState.finalized = completionState.finalized || Boolean(data.completion?.finalized);
+    refreshCompletionUi();
+    showCompletionOverlay(data);
+  } catch (err) {
+    if (statusEl) {
+      statusEl.textContent = err && err.message ? err.message : "Could not finalize.";
+    }
+  }
 }
 
 function openDescriptionOverlay() {
@@ -272,12 +430,21 @@ function updateActionButtons() {
   const stageReady = stageState.hasStages && stageState.nextStageReady;
   if (nextBtn) {
     const hasSelection = Boolean(selectedBrick);
-    nextBtn.disabled = Boolean(isGenerationInFlight || stageReady || !hasSelection);
+    if (completionState.finalized) {
+      nextBtn.textContent = "Finished";
+      nextBtn.disabled = true;
+    } else if (shouldFinishSession()) {
+      nextBtn.textContent = "Finish";
+      nextBtn.disabled = Boolean(isGenerationInFlight);
+    } else {
+      nextBtn.textContent = "Next";
+      nextBtn.disabled = Boolean(isGenerationInFlight || stageReady || !hasSelection);
+    }
   }
   if (stageBtn) {
-    const shouldShow = stageReady;
+    const shouldShow = stageReady && !completionState.complete;
     stageBtn.classList.toggle("hidden", !shouldShow);
-    stageBtn.disabled = Boolean(isGenerationInFlight);
+    stageBtn.disabled = Boolean(isGenerationInFlight || completionState.complete);
     if (shouldShow) {
       const labelNumber = Number.isFinite(stageState.nextStageNumber)
         ? stageState.nextStageNumber
@@ -640,6 +807,11 @@ async function startProcess() {
     } else {
       updateActionButtons();
     }
+    if (data.completion) {
+      applyCompletionPayload(data.completion);
+    } else {
+      refreshCompletionUi();
+    }
     const iterFromStart = Number(data.iteration ?? data.step);
     setIterationDisplay(Number.isFinite(iterFromStart) ? iterFromStart : null);
     const images = data.images || [];
@@ -836,6 +1008,11 @@ es.addEventListener("begin", (ev) => {
   } else {
     updateActionButtons();
   }
+  if (payload.completion) {
+    applyCompletionPayload(payload.completion);
+  } else {
+    refreshCompletionUi();
+  }
   // if (rankSection) rankSection.classList.add("hidden");
 
   renderPlaceholders(n);
@@ -873,6 +1050,11 @@ es.addEventListener("done", (ev) => {
   } else {
     updateActionButtons();
   }
+  if (payload.completion) {
+    applyCompletionPayload(payload.completion);
+  } else {
+    refreshCompletionUi();
+  }
 
   refreshSafetyFromServer();
 });
@@ -888,6 +1070,11 @@ es.addEventListener("stage", (ev) => {
     const payload = JSON.parse(ev.data);
     if (payload && payload.stage) {
       applyStagePayload(payload.stage);
+    }
+    if (payload && payload.completion) {
+      applyCompletionPayload(payload.completion);
+    } else {
+      refreshCompletionUi();
     }
     if (payload && Array.isArray(payload.images) && payload.images.length) {
       renderImageList(payload.images);
@@ -905,6 +1092,12 @@ async function refreshStageStatus() {
     const data = await resp.json();
     if (data && data.stage) {
       applyStagePayload(data.stage);
+    }
+
+    if (data && data.completion) {
+      applyCompletionPayload(data.completion);
+    } else {
+      refreshCompletionUi();
     }
 
     const serverExpected = Number.isFinite(data?.expected) ? Number(data.expected) : null;
@@ -976,6 +1169,10 @@ function getSelection() {
 
 if (nextBtn) {
   nextBtn.addEventListener("click", async () => {
+    if (shouldFinishSession()) {
+      await finalizeSession();
+      return;
+    }
     if (stageState.hasStages && stageState.nextStageReady) {
       statusEl.textContent = "Start the next stage before continuing.";
       updateActionButtons();
@@ -1004,8 +1201,32 @@ if (nextBtn) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ selection, n: nGuess })
       });
+      let data = {};
+      try {
+        data = await resp.json();
+      } catch {
+        data = {};
+      }
       if (!resp.ok) {
-        throw new Error("Next failed.");
+        const serverError = data && data.error ? data.error : "Next failed.";
+        throw new Error(serverError);
+      }
+      if (data && data.completion) {
+        applyCompletionPayload(data.completion);
+      } else {
+        refreshCompletionUi();
+      }
+      const serverMarkedComplete = Boolean(data && (data.complete || data?.completion?.complete));
+      const serverFinalized = Boolean(data?.completion?.finalized);
+      if (serverMarkedComplete || serverFinalized) {
+        if (data?.final_state_path) {
+          completionState.finalStatePath = data.final_state_path;
+        }
+        isGenerationInFlight = false;
+        await refreshStageStatus();
+        updateActionButtons();
+        refreshCompletionUi();
+        return;
       }
       // SSE will drive begin/slot/done
     } catch (err) {
@@ -1038,6 +1259,11 @@ if (stageBtn) {
         applyStagePayload(data.stage);
       } else {
         updateActionButtons();
+      }
+      if (data && data.completion) {
+        applyCompletionPayload(data.completion);
+      } else {
+        refreshCompletionUi();
       }
       if (!resp.ok) {
         const reasonCode = data && data.reason ? String(data.reason) : null;
