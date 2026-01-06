@@ -19,6 +19,7 @@ from search_benchmark.util import (
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 sim_model, preprocess = None, None
 gt_img = None
+to_sqrt_weight = False
 
 safety_check = True
 processor = None
@@ -53,7 +54,10 @@ def infer_image_img2img(component_weights,
     for i, lora_file in enumerate(lora_files):
         if weights[i] == 0:
             continue
-        loras.append((lora_file, math.sqrt(weights[i])))
+        if to_sqrt_weight:
+            loras.append((lora_file, math.sqrt(weights[i])))
+        else:
+            loras.append((lora_file, weights[i]))
 
     if image_path != None:
         if os.path.exists(image_path):
@@ -93,7 +97,10 @@ def infer_image(component_weights,
     for i, lora_file in enumerate(lora_files):
         if weights[i] == 0:
             continue
-        loras.append((lora_file, math.sqrt(weights[i])))
+        if to_sqrt_weight:
+            loras.append((lora_file, math.sqrt(weights[i])))
+        else:
+            loras.append((lora_file, weights[i]))
 
     if image_path != None:
         if os.path.exists(image_path):
