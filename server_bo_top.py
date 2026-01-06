@@ -1008,6 +1008,7 @@ class Engine:
             return False
 
         pl.seed_everything(self.seed)
+        print(f'Advancing to stage {self.stage_index + 1}...')
 
         self._archive_current_train_dataset(
             reason=f"stage-{self.stage_index}-complete")
@@ -1028,6 +1029,7 @@ class Engine:
                 if rec is None:
                     continue
                 ranked_indices.append(int(rec[1]))
+        
         if ranking_basenames:
             self.ranking_history.append({
                 "event": "stage-advance",
@@ -1042,7 +1044,8 @@ class Engine:
                 "ready_at": time.time(),
                 "train_version": int(self.train_dataset_version),
             })
-
+        self.step += 1
+        
         best_idx: int | None = ranked_indices[0] if ranked_indices else None
         self.comp_pairs = torch.empty((0, 2), dtype=torch.long, device=device)
 
@@ -1051,7 +1054,8 @@ class Engine:
         self.update_search_space(src_dir)
         seed_context = self.construct_init_samples(
             capture_context=True,
-            context_iteration=int(self.step) + 1,
+            # context_iteration=int(self.step) + 1,
+            context_iteration=int(self.step),
         )
 
         if seed_context:

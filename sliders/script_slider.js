@@ -39,6 +39,20 @@ let demographicsEnabled = false;
 let demographicsParticipantId = null;
 let demographicsSubmitted = false;
 let demographicsConfigLoaded = false; // retained for compatibility; not used to skip fetch
+let isRenderInFlight = false;
+
+const completionState = {
+  maxIterations: null,
+  currentIteration: null,
+  remainingIterations: null,
+  complete: false,
+  finalized: false,
+  finalStatePath: null,
+};
+let completionOverlay = null;
+let completionOverlayClose = null;
+let completionOverlaySubtitle = null;
+let completionOverlayPath = null;
 
 const HISTORY_EPSILON = 1e-4;
 
@@ -91,6 +105,171 @@ hoverZoom.attach(previewImg);
 
 function setBodyScrollLock(locked) {
   document.body.classList.toggle("no-scroll", Boolean(locked));
+}
+
+function shouldFinishSession() {
+  return Boolean(completionState.complete && !completionState.finalized);
+}
+
+function applyCompletionUiToRenderButton() {
+  if (!renderBtn) return;
+  if (completionState.finalized) {
+    renderBtn.textContent = "Finished";
+    renderBtn.disabled = true;
+    return;
+  }
+  if (shouldFinishSession()) {
+    renderBtn.textContent = "Finish";
+    renderBtn.disabled = Boolean(isRenderInFlight);
+    return;
+  }
+  renderBtn.textContent = "Render Image";
+}
+
+function refreshCompletionUi() {
+  if (statusEl) {
+    if (completionState.finalized) {
+      statusEl.textContent = "Session completed. Thank you!";
+    } else if (shouldFinishSession() && !isRenderInFlight) {
+      statusEl.textContent = "Maximum iterations reached. Click Finish to submit.";
+    }
+  }
+  applyCompletionUiToRenderButton();
+}
+
+function ensureCompletionOverlay() {
+  if (completionOverlay) return completionOverlay;
+  completionOverlay = document.createElement("div");
+  completionOverlay.id = "completionOverlay";
+  completionOverlay.className = "completion-overlay hidden";
+  completionOverlay.innerHTML = `
+    <div class="completion-card">
+      <div class="completion-body">
+        <h2>Thanks for participating!</h2>
+        <p id="completionSubtitle">Your responses have been recorded.</p>
+        <p id="completionPath" class="completion-path hidden"></p>
+        <div class="completion-actions">
+          <button type="button" id="completionClose">Close</button>
+        </div>
+      </div>
+    </div>`;
+  completionOverlayClose = completionOverlay.querySelector("#completionClose");
+  completionOverlaySubtitle = completionOverlay.querySelector("#completionSubtitle");
+  completionOverlayPath = completionOverlay.querySelector("#completionPath");
+  if (completionOverlayClose) {
+    completionOverlayClose.addEventListener("click", hideCompletionOverlay);
+  }
+  completionOverlay.addEventListener("click", (event) => {
+    if (event.target === completionOverlay) {
+      hideCompletionOverlay();
+    }
+  });
+  document.body.appendChild(completionOverlay);
+  return completionOverlay;
+}
+
+function hideCompletionOverlay() {
+  if (!completionOverlay) return;
+  completionOverlay.classList.add("hidden");
+  setBodyScrollLock(false);
+}
+
+function showCompletionOverlay(details = {}) {
+  ensureCompletionOverlay();
+  if (!completionOverlay) return;
+  const maxIters = completionState.maxIterations;
+  if (completionOverlaySubtitle) {
+    if (Number.isFinite(maxIters)) {
+      completionOverlaySubtitle.textContent = `You completed ${maxIters} iterations.`;
+    } else {
+      completionOverlaySubtitle.textContent = "You completed all assigned iterations.";
+    }
+  }
+  const finalPath = details.final_state_path || details.finalStatePath || completionState.finalStatePath;
+  if (completionOverlayPath) {
+    if (finalPath) {
+      completionOverlayPath.textContent = `Log saved to ${finalPath}`;
+      completionOverlayPath.classList.remove("hidden");
+    } else {
+      completionOverlayPath.textContent = "";
+      completionOverlayPath.classList.add("hidden");
+    }
+  }
+  completionOverlay.classList.remove("hidden");
+  setBodyScrollLock(true);
+}
+
+function applyCompletionPayload(payload) {
+  if (!payload || typeof payload !== "object") return completionState;
+  const prevComplete = completionState.complete;
+  const prevFinalized = completionState.finalized;
+
+  if (Object.prototype.hasOwnProperty.call(payload, "maxIterations")) {
+    const nextMax = Number(payload.maxIterations);
+    completionState.maxIterations = Number.isFinite(nextMax) ? nextMax : null;
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "currentIteration")) {
+    const nextCurrent = Number(payload.currentIteration);
+    completionState.currentIteration = Number.isFinite(nextCurrent) ? nextCurrent : completionState.currentIteration;
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "remainingIterations")) {
+    const nextRemaining = Number(payload.remainingIterations);
+    completionState.remainingIterations = Number.isFinite(nextRemaining) ? nextRemaining : null;
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "complete")) {
+    completionState.complete = Boolean(payload.complete);
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "finalized")) {
+    completionState.finalized = Boolean(payload.finalized);
+  }
+  const finalPath = payload.final_state_path || payload.finalStatePath;
+  if (finalPath) {
+    completionState.finalStatePath = finalPath;
+  }
+
+  refreshCompletionUi();
+
+  if (completionState.finalized && !prevFinalized) {
+    showCompletionOverlay(payload);
+  } else if (completionState.complete && !completionState.finalized && !prevComplete) {
+    if (statusEl && !isRenderInFlight) {
+      statusEl.textContent = "Maximum iterations reached. Click Finish to submit.";
+    }
+  }
+  return completionState;
+}
+
+async function finalizeSession() {
+  if (completionState.finalized) {
+    showCompletionOverlay({});
+    return;
+  }
+  try {
+    isRenderInFlight = true;
+    applyCompletionUiToRenderButton();
+    if (statusEl) statusEl.textContent = "Saving final responses…";
+    const resp = await fetch("/api/complete", { method: "POST" });
+    if (!resp.ok) {
+      throw new Error("Failed to finalize session.");
+    }
+    const data = await resp.json();
+    if (data.completion) {
+      applyCompletionPayload(data.completion);
+    }
+    if (data.final_state_path) {
+      completionState.finalStatePath = data.final_state_path;
+    }
+    completionState.finalized = completionState.finalized || Boolean(data.completion?.finalized);
+    refreshCompletionUi();
+    showCompletionOverlay(data);
+  } catch (err) {
+    if (statusEl) {
+      statusEl.textContent = err && err.message ? err.message : "Could not finalize.";
+    }
+  } finally {
+    isRenderInFlight = false;
+    applyCompletionUiToRenderButton();
+  }
 }
 
 function openDescriptionOverlay() {
@@ -642,6 +821,7 @@ function createSliderRow(label, value, index, thumbnailUrl) {
     sliderState[index] = clamped;
     rangeInput.value = clamped;
     if (renderBtn) renderBtn.disabled = sliderState.length === 0;
+    applyCompletionUiToRenderButton();
   });
 
   numberInput.addEventListener("blur", () => {
@@ -661,6 +841,7 @@ function createSliderRow(label, value, index, thumbnailUrl) {
     sliderState[index] = clamped;
     numberInput.value = clamped.toFixed(3);
     if (renderBtn) renderBtn.disabled = sliderState.length === 0;
+    applyCompletionUiToRenderButton();
   });
 
   detail.appendChild(head);
@@ -696,6 +877,7 @@ function buildSliderInterface(meta) {
 
   if (sliderPanel) sliderPanel.classList.toggle("hidden", labels.length === 0);
   if (renderBtn) renderBtn.disabled = labels.length === 0;
+  applyCompletionUiToRenderButton();
 }
 
 function renderHistory() {
@@ -815,6 +997,14 @@ if (demoForm) {
 
 async function handleStartClick(event) {
   if (event) event.preventDefault();
+  if (completionState.finalized) {
+    showCompletionOverlay({});
+    return;
+  }
+  if (shouldFinishSession()) {
+    await finalizeSession();
+    return;
+  }
   const cfg = await loadDemographicsConfig();
   if (!demographicsEnabled || demographicsSubmitted || !demoForm) {
     await startProcess();
@@ -842,6 +1032,12 @@ async function startProcess() {
     const data = await resp.json();
     if (!resp.ok) {
       throw new Error((data && data.error) || "Failed to start");
+    }
+
+    if (data.completion) {
+      applyCompletionPayload(data.completion);
+    } else {
+      refreshCompletionUi();
     }
 
     const iter = Number(data.iteration ?? data.step);
@@ -887,6 +1083,12 @@ async function refreshSliderStatus() {
     if (!resp.ok) return;
     const data = await resp.json();
 
+    if (data && data.completion) {
+      applyCompletionPayload(data.completion);
+    } else {
+      refreshCompletionUi();
+    }
+
     const iter = Number(data.iteration ?? data.step);
     setIterationDisplay(Number.isFinite(iter) ? iter : null);
     updateReferenceImage(data.gt_image);
@@ -909,11 +1111,21 @@ async function refreshSliderStatus() {
 }
 
 async function renderFromSliders(options = {}) {
+  if (completionState.finalized) {
+    showCompletionOverlay({});
+    return;
+  }
+  if (shouldFinishSession()) {
+    await finalizeSession();
+    return;
+  }
   if (!Array.isArray(sliderState) || !sliderState.length) return;
   const source = options && options.source ? String(options.source) : null;
   const isHistoryRender = source === "history";
   try {
     if (renderBtn) renderBtn.disabled = true;
+    isRenderInFlight = true;
+    applyCompletionUiToRenderButton();
     statusEl.textContent = isHistoryRender ? "Re-rendering saved sliders…" : "Rendering…";
 
     const resp = await fetch("/api/slider/eval", {
@@ -928,6 +1140,12 @@ async function renderFromSliders(options = {}) {
     const data = await resp.json();
     if (!resp.ok) {
       throw new Error((data && data.error) || "Failed to render");
+    }
+
+    if (data.completion) {
+      applyCompletionPayload(data.completion);
+    } else {
+      refreshCompletionUi();
     }
 
     if (Array.isArray(data.x)) {
@@ -962,11 +1180,14 @@ async function renderFromSliders(options = {}) {
       addHistoryEntry(data);
     }
     statusEl.textContent = isHistoryRender ? "History render complete." : "Render complete.";
+    refreshCompletionUi();
   } catch (err) {
     const msg = err && err.message ? err.message : err;
     statusEl.textContent = `Error: ${msg}`;
   } finally {
     if (renderBtn) renderBtn.disabled = sliderState.length === 0;
+    isRenderInFlight = false;
+    applyCompletionUiToRenderButton();
   }
 }
 
