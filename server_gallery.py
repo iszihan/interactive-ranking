@@ -4,7 +4,7 @@ from async_multi_gpu_pool import MultiGPUInferPool
 from engine import (obj_sim, infer_image_img2img,
                     prepare_init_obs_simplex, infer_image, check_nsfw_images)
 from demographics import Demographics
-from helper.sampler import sample_dirichlet_simplex
+from helper.sampler import sample_dirichlet_simplex, capped_sb_torch_budget
 from helper.infer import infer
 import pysps
 from diffusers.utils import load_image
@@ -36,6 +36,7 @@ from itertools import combinations
 import sys
 sys.path.append('/scratch/ondemand29/chenxil/code/mood-board')
 
+simplex_scale = 2.0
 
 def _bootstrap_config_override(argv: list[str] | None = None) -> None:
     if argv is None:
@@ -879,16 +880,31 @@ class Engine:
                 is_init=True,
             )
 
-        init_observations, x_record = prepare_init_obs_simplex(
-            self.num_observations,
-            len(self.component_weights),
-            self.f_preinit,
-            seed=self.seed,
-            sparse_threshold=None,
-            sampler=sample_dirichlet_simplex,
-            gpu_pool=self.gpu_pool,
-            payload_builder=_build_init_payload,
-        )
+        if simplex_scale == 1.0:
+            init_observations, x_record = prepare_init_obs_simplex(
+                self.num_observations,
+                len(self.component_weights),
+                self.f_preinit,
+                seed=self.seed,
+                sparse_threshold=None,
+                sampler=sample_dirichlet_simplex,
+                gpu_pool=self.gpu_pool,
+                payload_builder=_build_init_payload,
+            )
+        else:
+            def sample_capped_sb_budget(n_samples: int, d: int, seed: int | None = None):
+                return capped_sb_torch_budget(d, n_samples, seed=seed, budget=simplex_scale,
+                                              concentration=0.8)
+            init_observations, x_record = prepare_init_obs_simplex(
+                self.num_observations,
+                len(self.component_weights),
+                self.f_preinit,
+                seed=self.seed,
+                sparse_threshold=None,
+                sampler=sample_capped_sb_budget,
+                gpu_pool=self.gpu_pool,
+                payload_builder=_build_init_payload,
+            )
 
         x_observations_score = init_observations[1]
         best_x = init_observations[0][np.argmax(x_observations_score)]
