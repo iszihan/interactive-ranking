@@ -1,10 +1,11 @@
 # server_bo.py
 from serialize import export_engine_state, apply_engine_state, save_engine_state, load_engine_state
 from async_multi_gpu_pool import MultiGPUInferPool
-from helper.sampler import qmc_simplex_generator, get_mcmc_from_cache
+from helper.sampler import qmc_simplex_generator, get_mcmc_from_cache, capped_sb_generator
 from search_benchmark.acq_prior import (
     qSimplexUpperConfidenceBound,
-    stick_breaking_transform, inverse_stick_breaking_transform
+    stick_breaking_transform, inverse_stick_breaking_transform,
+    inverse_capped_stick_breaking_leq_transform, capped_stick_breaking_leq_transform
 )
 from botorch.optim.optimize import gen_batch_initial_conditions
 from botorch.optim import optimize_acqf
@@ -19,7 +20,7 @@ from search_benchmark.comparison_solvers import fit_gpytorch_pair_model, pairwis
 from search_benchmark.multi_solvers import break_clusters_even
 from search_benchmark.util import sample_shuffled_unshuffled
 from helper.build_clusters import build_cluster_hierarchy, find_images_for_folders, build_tree
-from helper.sampler import sample_dirichlet_simplex
+from helper.sampler import sample_dirichlet_simplex, capped_sb_torch_budget
 from helper.infer import infer
 import argparse
 import signal
@@ -53,6 +54,8 @@ import uvicorn
 from diffusers.utils import load_image
 import pySequentialLineSearch
 sys.path.append('/scratch/ondemand29/chenxil/code/mood-board')
+
+simplex_scale = 2.0
 
 
 def _bootstrap_config_override(argv: list[str] | None = None) -> None:
@@ -590,7 +593,8 @@ class Engine:
         target = self._completion_save_path()
         saved = None
         if target is not None:
-            saved = self.save_state(reason="complete", save_dir=target, force=True)
+            saved = self.save_state(
+                reason="complete", save_dir=target, force=True)
         else:
             print("No save-state dir configured; skipping completion save.")
         self.completion_finalized = True
@@ -1042,16 +1046,31 @@ class Engine:
                 is_init=is_init_run,
             )
 
-        self.x_observations, x_record = prepare_init_obs_simplex(
-            self.num_observations,
-            len(self.dim2loras),
-            inf_f,
-            seed=self.seed,
-            sparse_threshold=0.1,
-            sampler=sample_dirichlet_simplex,
-            gpu_pool=self.gpu_pool,
-            payload_builder=_build_init_payload,
-        )
+        if simplex_scale == 1.0:
+            self.x_observations, x_record = prepare_init_obs_simplex(
+                self.num_observations,
+                len(self.dim2loras),
+                inf_f,
+                seed=self.seed,
+                sparse_threshold=0.1,
+                sampler=sample_dirichlet_simplex,
+                gpu_pool=self.gpu_pool,
+                payload_builder=_build_init_payload,
+            )
+        else:
+            def sample_capped_sb_budget(n_samples: int, d: int, seed: int | None = None):
+                return capped_sb_torch_budget(d, n_samples, seed=seed, budget=simplex_scale,
+                                              concentration=0.8)
+            self.x_observations, x_record = prepare_init_obs_simplex(
+                self.num_observations,
+                len(self.dim2loras),
+                inf_f,
+                seed=self.seed,
+                sparse_threshold=0.1,
+                sampler=sample_capped_sb_budget,
+                gpu_pool=self.gpu_pool,
+                payload_builder=_build_init_payload,
+            )
         seed_context: dict | None = None
         context_iteration_value = context_iteration if context_iteration is not None else int(
             self.step)
@@ -1258,7 +1277,8 @@ class Engine:
         final_acq_function = qSimplexUpperConfidenceBound(
             model=gp,
             beta=self.beta,
-            sampler=qmc_sampler
+            sampler=qmc_sampler,
+            scale=simplex_scale,
         )
 
         eps = 1e-4  # small buffer away from 0/1 in parameter space
@@ -1283,8 +1303,12 @@ class Engine:
         #     raw_samples=raw_samples,
         # )
 
-        def generator(n, q, seed):
-            return qmc_simplex_generator(n, q, self.train_X.shape[1], seed)
+        def generator(n: int, q: int, seed: int | None = None):
+            if simplex_scale == 1.0:
+                return qmc_simplex_generator(n, q, self.train_X.shape[1], seed=seed, scale=simplex_scale)
+            else:
+                return capped_sb_generator(n, q, self.train_X.shape[1], seed=seed, scale=simplex_scale,
+                                           concentration=1.0)
         Xinit_coeff = gen_batch_initial_conditions(
             acq_function=acq_function,
             bounds=coeff_bounds,
@@ -1294,7 +1318,11 @@ class Engine:
             generator=generator
         )
         # Inverse stick-breaking: coeffs -> parameter space V in [0,1]
-        Xinit = inverse_stick_breaking_transform(Xinit_coeff)
+        if simplex_scale == 1.0:
+            Xinit = inverse_stick_breaking_transform(Xinit_coeff)
+        else:
+            Xinit = inverse_capped_stick_breaking_leq_transform(
+                Xinit_coeff, budget=simplex_scale)
 
         # Clamp initial conditions away from hard boundaries for stability
         Xinit = Xinit.clamp(min=eps, max=1 - eps)
@@ -1326,12 +1354,16 @@ class Engine:
 
         # Clamp once more just in case optimizer wandered numerically
         # new_x_ei = new_x_ei.clamp(min=eps_round, max=1 - eps_round)
-        eps_round = eps + 1e-6
-        new_x_ei[new_x_ei <= eps_round] = 0
-        new_x_ei[new_x_ei >= 1 - eps_round] = 1
+        eps_round = 100 * eps
+        # new_x_ei[new_x_ei <= eps_round] = 0
+        # new_x_ei[new_x_ei >= 1 - eps_round] = 1
 
         # --- 4. Map optimized parameters -> coefficients via stick breaking ---
-        new_x_ei = stick_breaking_transform(new_x_ei)
+        if simplex_scale == 1.0:
+            new_x_ei = stick_breaking_transform(new_x_ei)
+        else:
+            new_x_ei = capped_stick_breaking_leq_transform(
+                new_x_ei, budget=simplex_scale)
 
         new_x_ei[new_x_ei <= eps_round] = 0
         new_x_ei[new_x_ei >= 1 - eps_round] = 1

@@ -1,9 +1,11 @@
 # server_bo.py
 from serialize import export_engine_state, apply_engine_state, save_engine_state, load_engine_state
 from async_multi_gpu_pool import MultiGPUInferPool
+from helper.sampler import capped_sb_generator, capped_sb_torch_budget
 from search_benchmark.acq_prior import (
     qSimplexUpperConfidenceBound,
-    stick_breaking_transform, inverse_stick_breaking_transform
+    stick_breaking_transform, inverse_stick_breaking_transform,
+    inverse_capped_stick_breaking_leq_transform, capped_stick_breaking_leq_transform
 )
 from botorch.optim.optimize import gen_batch_initial_conditions
 from botorch.optim import optimize_acqf
@@ -51,6 +53,7 @@ import uvicorn
 from diffusers.utils import load_image
 sys.path.append('/scratch/ondemand29/chenxil/code/mood-board')
 
+simplex_scale = 2.0
 
 def _bootstrap_config_override(argv: list[str] | None = None) -> None:
     """Capture --config early so CONFIG_FILE and derived paths honor it."""
@@ -1133,16 +1136,31 @@ class Engine:
 
         _, _, lazy_dirichlet = _lazy_samplers(self.mcmc_cache_enabled)
 
-        self.x_observations, x_record = prepare_init_obs_simplex(
-            self.num_observations,
-            len(self.dim2loras),
-            inf_f,
-            seed=self.seed,
-            sparse_threshold=0.1,
-            sampler=lazy_dirichlet,
-            gpu_pool=self.gpu_pool,
-            payload_builder=_build_init_payload,
-        )
+        if simplex_scale == 1.0:
+            self.x_observations, x_record = prepare_init_obs_simplex(
+                self.num_observations,
+                len(self.dim2loras),
+                inf_f,
+                seed=self.seed,
+                sparse_threshold=0.1,
+                sampler=lazy_dirichlet,
+                gpu_pool=self.gpu_pool,
+                payload_builder=_build_init_payload,
+            )
+        else:
+            def sample_capped_sb_budget(n_samples: int, d: int, seed: int | None = None):
+                return capped_sb_torch_budget(d, n_samples, seed=seed, budget=simplex_scale,
+                                              concentration=0.8)
+            self.x_observations, x_record = prepare_init_obs_simplex(
+                self.num_observations,
+                len(self.dim2loras),
+                inf_f,
+                seed=self.seed,
+                sparse_threshold=0.1,
+                sampler=sample_capped_sb_budget,
+                gpu_pool=self.gpu_pool,
+                payload_builder=_build_init_payload,
+            )
         seed_context: dict | None = None
         context_iteration_value = context_iteration if context_iteration is not None else int(
             self.step)
@@ -1376,7 +1394,8 @@ class Engine:
             final_acq_function = qSimplexUpperConfidenceBound(
                 model=gp,
                 beta=self.beta,
-                sampler=qmc_sampler
+                sampler=qmc_sampler,
+                scale=simplex_scale,
             )
         else:
             final_acq_function = qUpperConfidenceBound(
@@ -1407,9 +1426,13 @@ class Engine:
         #     raw_samples=raw_samples,
         # )
 
-        def generator(n, q, seed):
-            lazy_qmc, _, _ = _lazy_samplers(self.mcmc_cache_enabled)
-            return lazy_qmc(n, q, self.train_X.shape[1], seed)
+        def generator(n: int, q: int, seed: int | None = None):
+            if simplex_scale == 1.0:
+                lazy_qmc, _, _ = _lazy_samplers(self.mcmc_cache_enabled)
+                return lazy_qmc(n, q, self.train_X.shape[1], seed=seed, scale=simplex_scale)
+            else:
+                return capped_sb_generator(n, q, self.train_X.shape[1], seed=seed, scale=simplex_scale,
+                                           concentration=1.0)
         Xinit_coeff = gen_batch_initial_conditions(
             acq_function=acq_function,
             bounds=coeff_bounds,
@@ -1420,7 +1443,11 @@ class Engine:
         )
         if self.stage_index == 0:
             # Inverse stick-breaking: coeffs -> parameter space V in [0,1]
-            Xinit = inverse_stick_breaking_transform(Xinit_coeff)
+            if simplex_scale == 1.0:
+                Xinit = inverse_stick_breaking_transform(Xinit_coeff)
+            else:
+                Xinit = inverse_capped_stick_breaking_leq_transform(
+                    Xinit_coeff, budget=simplex_scale)
 
             # Clamp initial conditions away from hard boundaries for stability
             Xinit = Xinit.clamp(min=eps, max=1 - eps)
@@ -1456,12 +1483,16 @@ class Engine:
         # Clamp once more just in case optimizer wandered numerically
         # new_x_ei = new_x_ei.clamp(min=eps_round, max=1 - eps_round)
         if self.stage_index == 0:
-            eps_round = eps + 1e-6
-            new_x_ei[new_x_ei <= eps_round] = 0
-            new_x_ei[new_x_ei >= 1 - eps_round] = 1
+            eps_round = 100 * eps
+            # new_x_ei[new_x_ei <= eps_round] = 0
+            # new_x_ei[new_x_ei >= 1 - eps_round] = 1
 
             # --- 4. Map optimized parameters -> coefficients via stick breaking ---
-            new_x_ei = stick_breaking_transform(new_x_ei)
+            if simplex_scale == 1.0:
+                new_x_ei = stick_breaking_transform(new_x_ei)
+            else:
+                new_x_ei = capped_stick_breaking_leq_transform(
+                    new_x_ei, budget=simplex_scale)
 
             new_x_ei[new_x_ei <= eps_round] = 0
             new_x_ei[new_x_ei >= 1 - eps_round] = 1
