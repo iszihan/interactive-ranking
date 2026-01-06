@@ -188,7 +188,8 @@ function showCompletionOverlay(details = {}) {
   const finalPath = details.final_state_path || details.finalStatePath || completionState.finalStatePath;
   if (completionOverlayPath) {
     if (finalPath) {
-      completionOverlayPath.textContent = `Log saved to ${finalPath}`;
+      // completionOverlayPath.textContent = `Log saved to ${finalPath}`;
+      completionOverlayPath.textContent = "";
       completionOverlayPath.classList.remove("hidden");
     } else {
       completionOverlayPath.textContent = "";
