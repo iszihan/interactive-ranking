@@ -1,8 +1,10 @@
 import asyncio
+import contextlib
 import os
 import copy
 import glob
 import math
+import fcntl
 from pathlib import Path
 
 from PIL import Image
@@ -38,6 +40,38 @@ if safety_check:
         "CompVis/stable-diffusion-safety-checker").to(device)
 
 
+def _image_lock_path(image_path: str) -> str:
+    return f"{image_path}.lock"
+
+
+@contextlib.contextmanager
+def file_lock(lock_path: str):
+    """Process-level exclusive lock using fcntl."""
+    lock_dir = os.path.dirname(lock_path)
+    if lock_dir:
+        os.makedirs(lock_dir, exist_ok=True)
+
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
+def open_image_locked(image_path: str) -> Image.Image:
+    lock_path = _image_lock_path(image_path)
+    with file_lock(lock_path):
+        with Image.open(image_path) as img:
+            return img.copy()
+
+
+def save_image_locked(image_path: str, img: Image.Image):
+    lock_path = _image_lock_path(image_path)
+    with file_lock(lock_path):
+        img.save(image_path)
+
+
 def infer_image_img2img(component_weights,
                         prompt,
                         negative_prompt,
@@ -59,10 +93,13 @@ def infer_image_img2img(component_weights,
         else:
             loras.append((lora_file, weights[i]))
 
-    if image_path != None:
-        if os.path.exists(image_path):
-            print(f"Image {image_path} already exists, skipping inference.")
-            return image_path, Image.open(image_path)
+    lock_path = _image_lock_path(image_path) if image_path is not None else None
+    if image_path is not None:
+        with file_lock(lock_path):
+            if os.path.exists(image_path):
+                print(f"Image {image_path} already exists, skipping inference.")
+                with Image.open(image_path) as existing_im:
+                    return image_path, existing_im.copy()
 
     # Example: generate or load your image as a numpy array
     triggers_str = ', '.join(triggers)
@@ -76,9 +113,15 @@ def infer_image_img2img(component_weights,
                            use_sdxl=True, image=control_img, img2img_denoise=img2img_denoise)
     # Convert to base64
     im = images[0]
-    if image_path != None:
-        im.save(image_path)
-    # Convert im to PIL Image
+
+    if image_path is not None:
+        with file_lock(lock_path):
+            if os.path.exists(image_path):
+                print(f"Image {image_path} already exists, skipping inference.")
+                with Image.open(image_path) as existing_im:
+                    return image_path, existing_im.copy()
+            im.save(image_path)
+
     im = Image.fromarray(np.array(im))
     return image_path, im
 
@@ -102,10 +145,13 @@ def infer_image(component_weights,
         else:
             loras.append((lora_file, weights[i]))
 
-    if image_path != None:
-        if os.path.exists(image_path):
-            print(f"Image {image_path} already exists, skipping inference.")
-            return image_path, Image.open(image_path)
+    lock_path = _image_lock_path(image_path) if image_path is not None else None
+    if image_path is not None:
+        with file_lock(lock_path):
+            if os.path.exists(image_path):
+                print(f"Image {image_path} already exists, skipping inference.")
+                with Image.open(image_path) as existing_im:
+                    return image_path, existing_im.copy()
 
     # Example: generate or load your image as a numpy array
     infer_prompt = input_prompt
@@ -121,10 +167,14 @@ def infer_image(component_weights,
     # Convert to base64
     im = images[0]
 
-    if image_path != None:
-        im.save(image_path)
+    if image_path is not None:
+        with file_lock(lock_path):
+            if os.path.exists(image_path):
+                print(f"Image {image_path} already exists, skipping inference.")
+                with Image.open(image_path) as existing_im:
+                    return image_path, existing_im.copy()
+            im.save(image_path)
 
-    # Convert im to PIL Image
     im = Image.fromarray(np.array(im))
 
     return image_path, im
@@ -158,7 +208,7 @@ def obj_sim(gt_img_path, component_weights, x, weight_idx, infer_image_func,
             img = Image.fromarray(img)
             image_path = os.path.join(
                 output_dir, f'sim_{weights_str}_sim{(sim_val.item()):.3f}.png')
-            img.save(image_path)
+            save_image_locked(image_path, img)
 
             return sim_val, image_path
 
@@ -171,7 +221,7 @@ def obj_sim(gt_img_path, component_weights, x, weight_idx, infer_image_func,
             output_dir, f'init_{weights_str}.png')
         if os.path.exists(image_path):
             print(f"Image {image_path} already exists, skipping inference.")
-            img = Image.open(image_path)
+            img = open_image_locked(image_path)
         else:
             print(f"Image {image_path} does not exist, running inference.")
 
@@ -194,9 +244,14 @@ def obj_sim(gt_img_path, component_weights, x, weight_idx, infer_image_func,
     if not is_init:
         image_path = os.path.join(
             output_dir, f'sim_{weights_str}_sim{(sim_val.item()):.3f}.png')
-    if output_dir is not None and to_vis and not os.path.exists(image_path):
-        img.save(image_path)
-        print(f"Saved image to: {image_path}")
+    if output_dir is not None and to_vis:
+        lock_path = _image_lock_path(image_path)
+        with file_lock(lock_path):
+            if not os.path.exists(image_path):
+                img.save(image_path)
+                print(f"Saved image to: {image_path}")
+            else:
+                print(f'Not saved (already exists): {image_path}')
     else:
         print(f'Not saved: {image_path}')
 

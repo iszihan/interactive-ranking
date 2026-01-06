@@ -906,6 +906,7 @@ class Engine:
                 payload_builder=_build_init_payload,
             )
 
+        print(f'init_observations: {init_observations}')
         x_observations_score = init_observations[1]
         best_x = init_observations[0][np.argmax(x_observations_score)]
         self.pysps_optimizer = pysps.Optimizer(len(self.component_weights),
