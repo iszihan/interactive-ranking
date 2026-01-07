@@ -265,7 +265,7 @@ body.no-scroll{
 }
 
 .rank-labels{
-  width: min(95vw, 1100px);
+  width: min(95vw, 1300px);
   display: flex;
   justify-content: space-between;
   margin: 0 auto 5px;
@@ -384,13 +384,13 @@ body.no-scroll{
 }
 
 .zoom-brick.nsfw-flagged img{
-  filter: blur(18px) saturate(0.6);
-  transform: scale(1.04);
+  filter: blur(28px) brightness(0.32) saturate(0.32);
+  transform: scale(1.05);
   transition: filter 0.2s ease, transform 0.2s ease;
 }
 .zoom-brick.nsfw-pending img{
-  filter: blur(14px) saturate(0.7);
-  transform: scale(1.03);
+  filter: blur(22px) brightness(0.46) saturate(0.4);
+  transform: scale(1.04);
   transition: filter 0.2s ease, transform 0.2s ease;
 }
 
@@ -413,6 +413,11 @@ body.no-scroll{
   padding: 0 14px;
   pointer-events: none;
   z-index: 2;
+}
+
+.zoom-brick .nsfw-overlay{
+  background: rgba(5, 7, 18, 0.82);
+  backdrop-filter: blur(18px);
 }
 
 /* ---------- demographics form ---------- */

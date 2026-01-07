@@ -164,16 +164,23 @@ body.no-scroll{ overflow: hidden; }
   overflow: hidden;
 }
 
+.zoom-brick.nsfw-flagged img{
+  filter: blur(28px) brightness(0.32) saturate(0.32);
+  transform: scale(1.05);
+  transition: filter 0.2s ease, transform 0.2s ease;
+}
 .zoom-brick.nsfw-pending img{
-  filter: blur(18px);
-  transform: scale(1.03);
+  filter: blur(22px) brightness(0.46) saturate(0.4);
+  transform: scale(1.04);
+  transition: filter 0.2s ease, transform 0.2s ease;
 }
 
 .zoom-safety-overlay{
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  background: rgba(8, 11, 27, 0.6);
+  background: rgba(5, 7, 18, 0.82);
+  backdrop-filter: blur(18px);
   color: #fff;
   font-size: 0.85rem;
   font-weight: 600;
@@ -186,6 +193,11 @@ body.no-scroll{ overflow: hidden; }
   padding: 0 20px;
   pointer-events: none;
   z-index: 3;
+}
+
+.zoom-brick .nsfw-overlay{
+  background: rgba(5, 7, 18, 0.82);
+  backdrop-filter: blur(18px);
 }
 
 /* Centered hover zoom preview */
