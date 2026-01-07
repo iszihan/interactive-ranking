@@ -265,7 +265,7 @@ body.no-scroll{
 }
 
 .rank-labels{
-  width: min(95vw, 1100px);
+  width: min(95vw, 1300px);
   display: flex;
   justify-content: center;
   margin: 0 auto 10px;
@@ -319,12 +319,37 @@ body.no-scroll{
   flex-direction: row;
   flex-wrap: nowrap;
   gap: 12px;
+  justify-content: center; /* center bricks when they don't overflow */
   overflow-x: auto;
   overflow-y: visible;
   padding: 36px 12px 40px;
+  /* On some Linux/Chrome builds, flex items inside a column container
+     with align-items:center can shrink-wrap to a very small width.
+     Force the ranking row to span the available width. */
+  width: min(95vw, 1300px);
   max-width: 100%;
+  /* align-self: stretch; */
   align-items: flex-start;
-  flex: 1 1 auto;
+  flex: 0 0 auto;
+}
+
+/* Center contents when the container is empty (placeholder only). */
+#container.empty{
+  justify-content: center;
+}
+
+/* Visible placeholder when no items have been selected yet */
+.rank-placeholder{
+  width: clamp(280px, 60vw, 720px);
+  min-height: clamp(var(--tile-min), var(--tile-ideal), var(--tile-max));
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #4b5563;
+  background: #f8fafc;
+  border: 2px dashed #cbd5e1;
+  border-radius: 12px;
 }
 
 #container .rank-number-badge{
@@ -421,13 +446,13 @@ body.no-scroll{
 }
 
 .zoom-brick.nsfw-flagged img{
-  filter: blur(18px) saturate(0.6);
-  transform: scale(1.04);
+  filter: blur(28px) brightness(0.32) saturate(0.32);
+  transform: scale(1.05);
   transition: filter 0.2s ease, transform 0.2s ease;
 }
 .zoom-brick.nsfw-pending img{
-  filter: blur(14px) saturate(0.7);
-  transform: scale(1.03);
+  filter: blur(22px) brightness(0.46) saturate(0.4);
+  transform: scale(1.04);
   transition: filter 0.2s ease, transform 0.2s ease;
 }
 
@@ -450,6 +475,11 @@ body.no-scroll{
   padding: 0 14px;
   pointer-events: none;
   z-index: 2;
+}
+
+.zoom-brick .nsfw-overlay{
+  background: rgba(5, 7, 18, 0.82);
+  backdrop-filter: blur(18px);
 }
 
 /* Centered hover zoom preview */

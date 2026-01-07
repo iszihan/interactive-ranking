@@ -1009,6 +1009,7 @@ function renderRankingFromSelection({ showLoading = false } = {}) {
 
   if (rankSection) rankSection.classList.remove("hidden");
   if (nextWrap) nextWrap.classList.remove("hidden");
+  container.classList.toggle("empty", rendered === 0);
   setTilesPerRow(rendered || 6);
   syncSafetyOverlays();
   syncSelectionStyles();
