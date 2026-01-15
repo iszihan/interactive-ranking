@@ -327,7 +327,7 @@ class Engine:
         self.sample_past_n = config.get('sample_past_n', 0)
         self.top_k = config.get('top_k', 5)
 
-        self.use_sdxl = True
+        self.use_sdxl = config.get('use_sdxl', True)
         self.negative_prompt = config.get('negative_prompt', '')
         self.infer_width = config.get('infer_width', 1024)
         self.infer_height = config.get('infer_height', 1024)

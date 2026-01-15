@@ -808,6 +808,8 @@ class Engine:
             raise ValueError(
                 f"Expected {dim} values, received {arr.shape[0] if arr.ndim == 1 else 'invalid shape'}.")
 
+        ts_received = time.time()
+        
         low, high = self.x_range
         arr = np.nan_to_num(arr, nan=low, posinf=high, neginf=low)
         arr = np.clip(arr, low, high)
@@ -839,7 +841,7 @@ class Engine:
             "x": arr.tolist(),
             "image": out_url,
             "similarity": sim_scalar,
-            "timestamp": ts_now,
+            "timestamp": ts_received,
             "ready_at": ts_now,
             "is_safe": is_safe,
         }

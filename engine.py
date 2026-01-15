@@ -23,7 +23,15 @@ sim_model, preprocess = None, None
 gt_img = None
 to_sqrt_weight = False
 
-safety_check = True
+# img2img_denoise = 0.8
+# img2img_denoise = 0.99
+# use_sdxl = False
+img2img_denoise = 0.7
+use_sdxl = True
+cfg = 7
+# cfg = 3.5
+
+safety_check = False
 processor = None
 safety_checker = None
 feature_extractor = None
@@ -80,7 +88,7 @@ def infer_image_img2img(component_weights,
                         infer_height=512,
                         image_path=None,
                         control_img=None):
-
+    global img2img_denoise, use_sdxl, cfg
     lora_files = [file for file, _ in component_weights]
     weights = [weight for _, weight in component_weights]
     triggers = find_triggers(lora_files, weights)
@@ -105,12 +113,11 @@ def infer_image_img2img(component_weights,
     triggers_str = ', '.join(triggers)
     positive_prompt = f'{triggers_str}, {prompt}'
     seed = 184759827843959
-    cfg = 7
-    img2img_denoise = 0.8
+    cfg = cfg
 
     images = infer_img2img(loras, positive_prompt, negative_prompt,
                            seed, steps, cfg, infer_width, infer_height,
-                           use_sdxl=True, image=control_img, img2img_denoise=img2img_denoise)
+                           use_sdxl=use_sdxl, image=control_img, img2img_denoise=img2img_denoise)
     # Convert to base64
     im = images[0]
 
@@ -421,6 +428,9 @@ def prepare_init_obs_simplex(num_observations, num_dim, f,
 def check_nsfw_images(
     images: list[Image.Image]
 ) -> list[bool]:
+    if not safety_check:
+        has_nsfw_concepts = [False] * len(images)
+        return has_nsfw_concepts
     # https://discuss.huggingface.co/t/sdxl-safety-checker/49633/3
     safety_checker_input = feature_extractor(
         images, return_tensors="pt").to(device)
