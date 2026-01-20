@@ -321,6 +321,7 @@ class Engine:
 
         self.num_observations = config.get('num_observations', 10)
         self.init_dir = config.get('init_dir', None)
+        self.input_control = config.get('control_path', None)
         self.seed = config.get('seed', 0)
         self.gt_config = config.get('gt_config', '')
         self.max_num_observations = config.get('max_num_observations', 20)
@@ -413,6 +414,10 @@ class Engine:
                         Path(comp_path).with_suffix(''))
 
         control_img_path = WORKING_DIR / 'control.png'
+        if self.input_control is not None:
+            # Copy to control_img_path
+            src_path = Path(self.input_control)
+            shutil.copyfile(src_path, control_img_path)
         if not control_img_path.exists():
             # infer an image with baseline model as control
             prompt = self.prompt
@@ -448,6 +453,9 @@ class Engine:
             [f"{c[1]:.2f}" for c in self.component_weights])
         self.gt_image_path = os.path.join(WORKING_DIR,
                                           f'gt_{self.weights_str}.png')
+        if self.input_control is not None:
+            # Copy the input control image as GT
+            shutil.copyfile(self.input_control, self.gt_image_path)
         if not os.path.exists(self.gt_image_path):
             image_path, self.gt_img = infer_image_img2img(
                 self.component_weights,

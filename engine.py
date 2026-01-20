@@ -23,10 +23,10 @@ sim_model, preprocess = None, None
 gt_img = None
 to_sqrt_weight = False
 
-# img2img_denoise = 0.8
+img2img_denoise = 0.8
 # img2img_denoise = 0.99
 # use_sdxl = False
-img2img_denoise = 0.7
+# img2img_denoise = 0.7
 use_sdxl = True
 cfg = 7
 # cfg = 3.5
